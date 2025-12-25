@@ -1,4 +1,4 @@
-import serial
+""" import serial
 import time
 
 # --- Configuration ---
@@ -53,4 +53,29 @@ if __name__ == "__main__":
                 time.sleep(2)
         except KeyboardInterrupt:
             print("\nClosing connection...")
-            my_ser.close()
+            my_ser.close() """
+    
+#test Serial0 14/15 we are using /dev/ttyAMA3 4-rx 5tx             
+import serial
+import time
+
+print("Opening Serial Port...")
+# Open the hardware serial port
+ser = serial.Serial('/dev/serial0', 115200, timeout=1)
+
+# Clear any junk
+ser.reset_input_buffer()
+
+print("Sending 'PING' to Pico...")
+while True:
+    # 1. Send Command
+    ser.write(b"PING\n")
+    
+    # 2. Listen for Reply
+    if ser.in_waiting > 0:
+        line = ser.readline().decode('utf-8', errors='ignore').strip()
+        print(f"Pico Says: {line}")
+    else:
+        print("... No data from Pico")
+    
+    time.sleep(1)

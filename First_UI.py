@@ -16,8 +16,15 @@ class KioskApp(tk.Tk):
     def __init__(self):
         super().__init__()
         
-        # 1. Hardware/Display Setup
-        self.attributes("-fullscreen", True)
+        # 1. Hardware/Display Setup (Fixed resolution 800x480)
+        w, h = 800, 480
+        self.geometry(f"{w}x{h}")
+        # center window on the screen
+        self.update_idletasks()
+        x = (self.winfo_screenwidth() // 2) - (w // 2)
+        y = (self.winfo_screenheight() // 2) - (h // 2)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.resizable(False, False)
         self.config(cursor="none", bg=CLR_BG)
         self.bind("<Escape>", lambda e: self.destroy())
 

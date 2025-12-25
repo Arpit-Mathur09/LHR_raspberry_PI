@@ -5,6 +5,13 @@ LHR Raspberry PI code for
 - Camera Frame Streaming 
 - Storing Protocols (gcode files etc)
 
+KIOSK SETUP 
+- Install Raspberry PI OS (64 bit) CLI on your Raspberry PI
+-apt update && apt upgrade -y
+- Install required packages should be install in root
+    sudo apt install --no-install-recommends xserver-xorg x11-xserver-utils xinit openbox chromium unclutter
+
+
 
 ⚠️ Important Note:
 - We write pyserial in this file, even though we import it as import serial in Python.
