@@ -1,0 +1,12 @@
+check in both ui and server sync
+download
+pause ui/remote
+resume ui/remote 
+stop pop up in case of remote and logs proper
+
+check in srever
+download 
+calibration 
+logs
+
+check in ui
