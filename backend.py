@@ -10,10 +10,11 @@ from datetime import datetime
 # --- CONFIGURATION ---
 SERVER_URL = "http://192.168.31.236:5000" 
 BASE_DIR = "/home/lhr/Robot_Client"
-LOCAL_DIR = os.path.join(BASE_DIR, "recent_protocols")
+DIR_RECENT = os.path.join(BASE_DIR, "recent_protocols")
+DIR_TEST = os.path.join(BASE_DIR, "test_protocols")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 
-for d in [LOCAL_DIR, LOG_DIR]: os.makedirs(d, exist_ok=True)
+for d in [DIR_RECENT, DIR_TEST, LOG_DIR]: os.makedirs(d, exist_ok=True)
 
 class RobotClient:
     def __init__(self):
@@ -138,7 +139,8 @@ class RobotClient:
         elif ev == "CLEAR": 
             self.command_queue.put(("REMOTE_STOP", None))
         elif ev == "NEW_FILE": 
-            self.download_file(cmd["filename"])
+            # SERVER sent this, so we MUST download it
+            self.command_queue.put(("DOWNLOAD_AND_RUN", cmd["filename"]))
         elif ev == "SERIAL_SEND":
             if self.ser:
                 self.log(f"TX (Remote): {cmd['data']}")
@@ -156,41 +158,82 @@ class RobotClient:
                 pending_desc = ""
         return steps
 
-    def download_file(self, filename):
-        self.log(f"📥 Downloading {filename}...")
-        try:
-            local_path = os.path.join(LOCAL_DIR, filename)
-            url = f"{SERVER_URL}/download/{filename}"
-            r = requests.get(url, timeout=3)
-            if r.status_code == 200:
-                with open(local_path, "wb") as f: f.write(r.content)
+    # --- NEW: LOCAL LOAD LOGIC (Offline Safe) ---
+    def load_local_protocol(self, filename):
+        self.log(f"📂 Loading Local File: {filename}")
+        
+        # 1. Search in Recent, then Test
+        target_path = None
+        path_recent = os.path.join(DIR_RECENT, filename)
+        path_test = os.path.join(DIR_TEST, filename)
+        
+        if os.path.exists(path_recent):
+            target_path = path_recent
+        elif os.path.exists(path_test):
+            target_path = path_test
             
-            with open(local_path, "r", encoding="utf-8") as f: raw_lines = f.readlines()
+        if not target_path:
+            self.log(f"❌ File not found locally: {filename}")
+            self.state["error_msg"] = f"File not found: {filename}"
+            return
+
+        # 2. Read & Parse
+        try:
+            with open(target_path, "r", encoding="utf-8") as f: 
+                raw_lines = f.readlines()
+            
             self.protocol_steps = self.parse_gcode_file(raw_lines)
             self.state["filename"] = filename
-            self.ptr = 0; self.seq_num = 1
-            self.is_running = True; self.is_paused = False
+            self.ptr = 0
+            self.seq_num = 1
+            self.is_running = True
+            self.is_paused = False
             self.state["status"] = "Running"
             
             self.state["stop_reason"] = None
             self.state["pause_reason"] = None
             self.state["error_msg"] = None
             self.state["completed"] = False
-            self.start_time = time.time(); self.smoothed_seconds = 0; self.state["est"] = "Calculating..."
+            self.start_time = time.time()
+            self.smoothed_seconds = 0
+            self.state["est"] = "Calculating..."
             
             GPIO.output(self.PIN_PAUSE, 0)
             self.start_new_log_session(filename)
             if self.ser: self.ser.reset_input_buffer()
-        except Exception as e: self.log(f"❌ Load Error: {e}")
+            
+        except Exception as e:
+            self.log(f"❌ Read Error: {e}")
+            self.state["error_msg"] = "Failed to read file"
+
+    # --- NEW: DOWNLOAD LOGIC (Server Only) ---
+    def download_protocol(self, filename):
+        self.log(f"📥 Downloading from Server: {filename}...")
+        try:
+            local_path = os.path.join(DIR_RECENT, filename)
+            url = f"{SERVER_URL}/download/{filename}"
+            r = requests.get(url, timeout=3)
+            
+            if r.status_code == 200:
+                with open(local_path, "wb") as f: 
+                    f.write(r.content)
+                self.log("✅ Download Complete")
+                # After download, load it locally
+                self.load_local_protocol(filename)
+            else:
+                self.log(f"❌ Server Error: {r.status_code}")
+        except Exception as e:
+            self.log(f"❌ Download Failed: {e}")
 
     def ui_send_gcode(self, gcode): self.command_queue.put(("MANUAL", gcode))
-    def ui_load_and_run(self, filename): self.command_queue.put(("LOAD", filename))
+    
+    # UI Calls this -> Puts "LOAD_LOCAL" in queue
+    def ui_load_and_run(self, filename): self.command_queue.put(("LOAD_LOCAL", filename))
+    
     def ui_pause_resume(self): self.command_queue.put(("TOGGLE_PAUSE", None))
     def ui_stop(self): self.command_queue.put(("STOP", None))
     
-    # --- UI ACKNOWLEDGEMENT (UPDATED: CLEARS EVERYTHING) ---
     def ui_ack_stop(self): 
-        """Called when user clicks OK on Stop/Done popup. Resets all state variables."""
         self.state["stop_reason"] = None 
         self.state["completed"] = False
         self.state["filename"] = "None"
@@ -201,7 +244,6 @@ class RobotClient:
         self.state["est"] = "--:--:--:--"
     
     def ui_ack_error(self):
-        """Called when user clicks OK on Error popup."""
         self.state["error_msg"] = None
         self.state["filename"] = "None"
         self.state["status"] = "Idle"
@@ -230,8 +272,14 @@ class RobotClient:
                     if cmd_type == "MANUAL" and self.ser: 
                         self.ser.write((data + "\n").encode())
                     
-                    elif cmd_type == "LOAD": 
-                        self.download_file(data)
+                    # --- LOCAL LOAD (UI triggered) ---
+                    elif cmd_type == "LOAD_LOCAL": 
+                        self.load_local_protocol(data)
+                        waiting_for_response = False
+
+                    # --- DOWNLOAD (Server triggered) ---
+                    elif cmd_type == "DOWNLOAD_AND_RUN":
+                        self.download_protocol(data)
                         waiting_for_response = False
                     
                     elif cmd_type == "STOP" or cmd_type == "REMOTE_STOP":
@@ -239,19 +287,15 @@ class RobotClient:
                         self.state["stop_reason"] = source 
                         self.is_running = False
                         self.state["status"] = f"Stopped ({source})"
-                        
-                        # FORCE RESET INTERNAL STATE
                         self.state["progress"] = 0
                         self.state["est"] = "--:--:--:--"
                         self.state["current_line"] = "Ready" 
                         self.state["current_desc"] = ""
-                        
                         self.expect_reset = True 
                         waiting_for_response = False
                         self.log(f"🛑 STOPPED ({source})")
                         self.hard_reset_pico()
 
-                    # --- PAUSE / RESUME LOGIC ---
                     elif cmd_type in ["TOGGLE_PAUSE", "REMOTE_PAUSE", "REMOTE_RESUME"]:
                         should_pause = False
                         if cmd_type == "REMOTE_PAUSE": should_pause = True
