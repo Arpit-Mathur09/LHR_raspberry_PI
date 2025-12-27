@@ -1,3 +1,4 @@
+# v1.1 backend fixed file name none             
 import requests
 import serial
 import time
@@ -29,9 +30,13 @@ class RobotClient:
         self.smoothed_seconds = 0
         self.log_accumulator = []
         self.current_session_log = None
-        self.stop_source = None 
         self.server_connected = False
         self.expect_reset = False
+        
+        # --- NEW: GRACE PERIOD ---
+        # We ignore "ERR" messages for 3 seconds after connection to avoid startup noise
+        self.connection_time = time.time()
+        self.grace_period = 3.0 
 
         # --- GPIO SETUP ---
         self.PIN_RESET = 17   
@@ -46,12 +51,13 @@ class RobotClient:
 
         # --- SERIAL ---
         try:
-            print("🔌 Connecting to Serial...")
+            print("🔌 Connecting to Serial...", flush=True)
             self.ser = serial.Serial('/dev/ttyAMA3', 115200, timeout=0.1)
             self.ser.reset_input_buffer()
             self.state["connection"] = "Connected"
+            self.connection_time = time.time() # Start grace timer
         except Exception as e:
-            print(f"⚠️ Serial Error: {e}")
+            print(f"⚠️ Serial Error: {e}", flush=True)
             self.state["connection"] = "Error"
             self.ser = None
 
@@ -62,11 +68,13 @@ class RobotClient:
         self.seq_num = 1 
 
     def hard_reset_pico(self):
-        print("⚡ Hard Resetting Pico...")
+        print("⚡ Hard Resetting Pico...", flush=True)
         GPIO.output(self.PIN_RESET, 0)
         time.sleep(0.2)
         GPIO.output(self.PIN_RESET, 1)
         time.sleep(1.5)
+        # Reset grace period after a hard reset
+        self.connection_time = time.time()
 
     def calculate_estimate(self):
         if not self.is_running or self.is_paused or not self.start_time: return
@@ -98,7 +106,7 @@ class RobotClient:
     def log(self, msg):
         timestamp = datetime.now().strftime("%H:%M:%S")
         entry = f"[{timestamp}] {msg}"
-        print(entry)
+        print(entry, flush=True) # Force print to appear immediately
         self.state["logs"].append(entry)
         if len(self.state["logs"]) > 5: self.state["logs"].pop(0)
         self.log_accumulator.append(entry)
@@ -139,7 +147,6 @@ class RobotClient:
         elif ev == "CLEAR": 
             self.command_queue.put(("REMOTE_STOP", None))
         elif ev == "NEW_FILE": 
-            # SERVER sent this, so we MUST download it
             self.command_queue.put(("DOWNLOAD_AND_RUN", cmd["filename"]))
         elif ev == "SERIAL_SEND":
             if self.ser:
@@ -158,44 +165,37 @@ class RobotClient:
                 pending_desc = ""
         return steps
 
-    # --- NEW: LOCAL LOAD LOGIC (Offline Safe) ---
+    # --- LOCAL LOADING (For UI) ---
     def load_local_protocol(self, filename):
-        self.log(f"📂 Loading Local File: {filename}")
-        
-        # 1. Search in Recent, then Test
+        self.log(f"📂 Loading Local: {filename}")
         target_path = None
-        path_recent = os.path.join(DIR_RECENT, filename)
-        path_test = os.path.join(DIR_TEST, filename)
         
-        if os.path.exists(path_recent):
-            target_path = path_recent
-        elif os.path.exists(path_test):
-            target_path = path_test
+        # Check folders
+        if os.path.exists(os.path.join(DIR_RECENT, filename)):
+            target_path = os.path.join(DIR_RECENT, filename)
+        elif os.path.exists(os.path.join(DIR_TEST, filename)):
+            target_path = os.path.join(DIR_TEST, filename)
             
         if not target_path:
-            self.log(f"❌ File not found locally: {filename}")
-            self.state["error_msg"] = f"File not found: {filename}"
+            self.log(f"❌ File not found: {filename}")
             return
 
-        # 2. Read & Parse
         try:
             with open(target_path, "r", encoding="utf-8") as f: 
                 raw_lines = f.readlines()
             
             self.protocol_steps = self.parse_gcode_file(raw_lines)
             self.state["filename"] = filename
-            self.ptr = 0
-            self.seq_num = 1
-            self.is_running = True
-            self.is_paused = False
+            self.ptr = 0; self.seq_num = 1
+            self.is_running = True; self.is_paused = False
             self.state["status"] = "Running"
             
+            # CLEAR PREVIOUS ERRORS
             self.state["stop_reason"] = None
-            self.state["pause_reason"] = None
             self.state["error_msg"] = None
             self.state["completed"] = False
-            self.start_time = time.time()
-            self.smoothed_seconds = 0
+            
+            self.start_time = time.time(); self.smoothed_seconds = 0
             self.state["est"] = "Calculating..."
             
             GPIO.output(self.PIN_PAUSE, 0)
@@ -204,21 +204,18 @@ class RobotClient:
             
         except Exception as e:
             self.log(f"❌ Read Error: {e}")
-            self.state["error_msg"] = "Failed to read file"
 
-    # --- NEW: DOWNLOAD LOGIC (Server Only) ---
+    # --- DOWNLOAD (For Server) ---
     def download_protocol(self, filename):
-        self.log(f"📥 Downloading from Server: {filename}...")
+        self.log(f"📥 Downloading: {filename}...")
         try:
             local_path = os.path.join(DIR_RECENT, filename)
             url = f"{SERVER_URL}/download/{filename}"
             r = requests.get(url, timeout=3)
             
             if r.status_code == 200:
-                with open(local_path, "wb") as f: 
-                    f.write(r.content)
-                self.log("✅ Download Complete")
-                # After download, load it locally
+                with open(local_path, "wb") as f: f.write(r.content)
+                self.log("✅ Downloaded")
                 self.load_local_protocol(filename)
             else:
                 self.log(f"❌ Server Error: {r.status_code}")
@@ -226,31 +223,24 @@ class RobotClient:
             self.log(f"❌ Download Failed: {e}")
 
     def ui_send_gcode(self, gcode): self.command_queue.put(("MANUAL", gcode))
-    
-    # UI Calls this -> Puts "LOAD_LOCAL" in queue
     def ui_load_and_run(self, filename): self.command_queue.put(("LOAD_LOCAL", filename))
-    
     def ui_pause_resume(self): self.command_queue.put(("TOGGLE_PAUSE", None))
     def ui_stop(self): self.command_queue.put(("STOP", None))
     
-    def ui_ack_stop(self): 
+    # --- NUCLEAR RESETS ---
+    def reset_all_state(self):
         self.state["stop_reason"] = None 
         self.state["completed"] = False
+        self.state["error_msg"] = None # <--- Clear Error!
         self.state["filename"] = "None"
         self.state["status"] = "Idle"
         self.state["current_line"] = "Ready"
         self.state["current_desc"] = ""
         self.state["progress"] = 0
         self.state["est"] = "--:--:--:--"
-    
-    def ui_ack_error(self):
-        self.state["error_msg"] = None
-        self.state["filename"] = "None"
-        self.state["status"] = "Idle"
-        self.state["current_line"] = "Ready"
-        self.state["current_desc"] = ""
-        self.state["progress"] = 0
-        self.state["est"] = "--:--:--:--"
+
+    def ui_ack_stop(self): self.reset_all_state()
+    def ui_ack_error(self): self.reset_all_state()
 
     def start(self):
         t = threading.Thread(target=self._run_loop, daemon=True)
@@ -272,28 +262,30 @@ class RobotClient:
                     if cmd_type == "MANUAL" and self.ser: 
                         self.ser.write((data + "\n").encode())
                     
-                    # --- LOCAL LOAD (UI triggered) ---
                     elif cmd_type == "LOAD_LOCAL": 
                         self.load_local_protocol(data)
                         waiting_for_response = False
 
-                    # --- DOWNLOAD (Server triggered) ---
                     elif cmd_type == "DOWNLOAD_AND_RUN":
                         self.download_protocol(data)
                         waiting_for_response = False
                     
                     elif cmd_type == "STOP" or cmd_type == "REMOTE_STOP":
                         source = "Remote" if cmd_type == "REMOTE_STOP" else "UI"
-                        self.state["stop_reason"] = source 
                         self.is_running = False
+                        self.log(f"🛑 STOPPED ({source})")
+                        
+                        # --- FIX START: PRESERVE FILENAME FOR UI ---
+                        last_file = self.state["filename"] # Save
+                        self.reset_all_state()             # Wipe
+                        self.state["filename"] = last_file # Restore
+                        # --- FIX END ---
+
                         self.state["status"] = f"Stopped ({source})"
-                        self.state["progress"] = 0
-                        self.state["est"] = "--:--:--:--"
-                        self.state["current_line"] = "Ready" 
-                        self.state["current_desc"] = ""
+                        self.state["stop_reason"] = source 
+                        
                         self.expect_reset = True 
                         waiting_for_response = False
-                        self.log(f"🛑 STOPPED ({source})")
                         self.hard_reset_pico()
 
                     elif cmd_type in ["TOGGLE_PAUSE", "REMOTE_PAUSE", "REMOTE_RESUME"]:
@@ -345,18 +337,22 @@ class RobotClient:
                             waiting_for_response = False
                     
                     if "ERR" in resp:
-                        parts = resp.split(":", 1) 
-                        clean_err = parts[1].strip() if len(parts) > 1 else "Unknown Hardware Error"
-                        self.log(f"❌ PICO ERROR: {clean_err}")
-                        self.is_running = False
-                        self.state["status"] = "Error"
-                        self.state["error_msg"] = clean_err 
-                        self.state["current_line"] = "Error"
-                        self.state["current_desc"] = "Halted"
-                        self.state["est"] = "ERROR"
-                        waiting_for_response = False
-                        self.expect_reset = True 
-                        self.hard_reset_pico()
+                        # --- GRACE PERIOD CHECK ---
+                        if time.time() - self.connection_time < self.grace_period:
+                            self.log(f"⚠️ Ignored Startup Noise: {resp}")
+                        else:
+                            parts = resp.split(":", 1) 
+                            clean_err = parts[1].strip() if len(parts) > 1 else "Unknown Hardware Error"
+                            self.log(f"❌ PICO ERROR: {clean_err}")
+                            self.is_running = False
+                            self.state["status"] = "Error"
+                            self.state["error_msg"] = clean_err 
+                            self.state["current_line"] = "Error"
+                            self.state["current_desc"] = "Halted"
+                            self.state["est"] = "ERROR"
+                            waiting_for_response = False
+                            self.expect_reset = True 
+                            self.hard_reset_pico()
 
                     if self.is_running:
                         if "PAUSE" in resp:
