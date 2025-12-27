@@ -75,7 +75,6 @@ class RoundedButton(tk.Canvas):
         self.bg_color = bg; self.hover_color = hover; self.itemconfig(self.rect_id, fill=bg)
 
     def flash(self, color=CLR_PRIMARY):
-        # Temporarily changes button color to indicate a press
         original = self.bg_color
         self.itemconfig(self.rect_id, fill=color)
         self.after(150, lambda: self.itemconfig(self.rect_id, fill=original))
@@ -192,61 +191,45 @@ class ModalOverlay(tk.Toplevel):
 
 # --- POPUPS ---
 class CustomPopup(ModalOverlay):
-    def __init__(self, parent, title, header, message, color, icon_text):
+    def __init__(self, parent, title, header, message, color, icon_text, height=340, icon_size=50):
         super().__init__(parent)
-        # --- REDUCED SIZE ---
-        cw, ch = 420, 290 
+        cw, ch = 420, height 
         cx = parent.winfo_width() / 2; cy = parent.winfo_height() / 2
         self.cv.create_rectangle(cx - cw/2 + 6, cy - ch/2 + 6, cx + cw/2 + 6, cy + ch/2 + 6, fill=CLR_SHADOW, outline="")
         self.cv.create_rectangle(cx - cw/2, cy - ch/2, cx + cw/2, cy + ch/2, fill="white", outline=color, width=2)
         self.f = tk.Frame(self.cv, bg="white", width=cw-4, height=ch-4); self.f.pack_propagate(False)
         self.cv.create_window(cx, cy, window=self.f)
         
-        # --- VERTICAL LAYOUT (Tighter Padding) ---
-        head_box = tk.Frame(self.f, bg="white"); head_box.pack(pady=(15, 5))
-        
-        # 1. Icon (Slightly Smaller)
-        tk.Label(head_box, text=icon_text, font=("Arial", 45), fg=color, bg="white").pack(side="top", pady=(0, 2))
-        
-        # 2. Header
-        tk.Label(head_box, text=header, font=("Arial", 18, "bold"), fg=color, bg="white").pack(side="top")
-        
-        tk.Frame(self.f, height=3, bg=color, width=320).pack(pady=5)
-        
+        head_box = tk.Frame(self.f, bg="white"); head_box.pack(pady=(25, 5))
+        tk.Label(head_box, text=icon_text, font=("Arial", icon_size), fg=color, bg="white").pack(side="top", pady=(0, 5))
+        tk.Label(head_box, text=header, font=("Arial", 20, "bold"), fg=color, bg="white").pack(side="top")
+        tk.Frame(self.f, height=3, bg=color, width=320).pack(pady=10)
         msg_frame = tk.Frame(self.f, bg="white"); msg_frame.pack(pady=5, padx=20)
         for line in message.split("\n"): 
             tk.Label(msg_frame, text=line, font=("Arial", 12), bg="white", fg="#444").pack(anchor="n")
-        
-        btn_f = tk.Frame(self.f, bg="white"); btn_f.pack(side="bottom", pady=15)
-        RoundedButton(btn_f, text="OK", command=self.destroy, width=140, height=45, bg_color=color, hover_color=color).pack()
+        btn_f = tk.Frame(self.f, bg="white"); btn_f.pack(side="bottom", pady=25)
+        RoundedButton(btn_f, text="OK", command=self.destroy, width=140, height=50, bg_color=color, hover_color=color).pack()
         self.deiconify(); self.update_idletasks()
 
 class CustomConfirmPopup(ModalOverlay):
     def __init__(self, parent, title, header, message):
         super().__init__(parent); self.result = False
-        # --- REDUCED SIZE ---
-        cw, ch = 400, 250 
+        cw, ch = 400, 220  
         cx = parent.winfo_width() / 2; cy = parent.winfo_height() / 2
         self.cv.create_rectangle(cx - cw/2 + 6, cy - ch/2 + 6, cx + cw/2 + 6, cy + ch/2 + 6, fill=CLR_SHADOW, outline="")
         self.cv.create_rectangle(cx - cw/2, cy - ch/2, cx + cw/2, cy + ch/2, fill="white", outline=CLR_DANGER, width=2)
         self.f = tk.Frame(self.cv, bg="white", width=cw-4, height=ch-4); self.f.pack_propagate(False)
         self.cv.create_window(cx, cy, window=self.f)
         
-        # --- VERTICAL LAYOUT (Tighter Padding) ---
         head_box = tk.Frame(self.f, bg="white"); head_box.pack(pady=(10, 2))
-        
-        # 1. Question Icon
-        tk.Label(head_box, text="?", font=("Arial", 45), fg=CLR_DANGER, bg="white").pack(side="top", pady=(0, 0))
-        
-        # 2. Header
+        tk.Label(head_box, text="?", font=("Arial", 42), fg=CLR_DANGER, bg="white").pack(side="top", pady=(0, 0))
         tk.Label(head_box, text=header, font=("Arial", 18, "bold"), fg=CLR_DANGER, bg="white").pack(side="top")
-        
-        tk.Frame(self.f, height=3, bg=CLR_DANGER, width=300).pack(pady=8)
+        tk.Frame(self.f, height=3, bg=CLR_DANGER, width=300).pack(pady=5)
         tk.Label(self.f, text=message, font=("Arial", 12), bg="white", fg="#444").pack(pady=2)
         
         btn_f = tk.Frame(self.f, bg="white"); btn_f.pack(side="bottom", pady=15)
         RoundedButton(btn_f, text="CANCEL", command=self.on_cancel, width=110, height=45, bg_color="#9E9E9E", hover_color="#757575").pack(side="left", padx=10)
-        RoundedButton(btn_f, text="STOP", command=self.on_confirm, width=110, height=45, bg_color=CLR_DANGER, hover_color=CLR_DANGER_HOVER).pack(side="left", padx=10)
+        RoundedButton(btn_f, text="CONFIRM", command=self.on_confirm, width=110, height=45, bg_color=CLR_DANGER, hover_color=CLR_DANGER_HOVER).pack(side="left", padx=10)
         
         self.deiconify(); self.update_idletasks(); self.wait_window()
     def on_confirm(self): self.result = True; self.destroy()
@@ -262,7 +245,6 @@ class HomingPopup(ModalOverlay):
         cx = parent.winfo_width() / 2; cy = parent.winfo_height() / 2
         self.cv.create_rectangle(cx - cw/2 + 6, cy - ch/2 + 6, cx + cw/2 + 6, cy + ch/2 + 6, fill=CLR_SHADOW, outline="")
         self.cv.create_rectangle(cx - cw/2, cy - ch/2, cx + cw/2, cy + ch/2, fill="white", outline=CLR_PRIMARY, width=2)
-        
         self.f = tk.Frame(self.cv, bg="white", width=cw-4, height=ch-4); self.f.pack_propagate(False)
         self.cv.create_window(cx, cy, window=self.f)
         
@@ -283,7 +265,6 @@ class HomingPopup(ModalOverlay):
         log_box.pack(pady=10, padx=20, fill="x")
         self.lbl_log = tk.Label(log_box, text="Waiting...", font=("Courier", 10), bg="#F5F5F5", fg="#333")
         self.lbl_log.pack(pady=5)
-        
         self.deiconify(); self.update_idletasks(); self.monitor()
 
     def monitor(self):
@@ -292,15 +273,13 @@ class HomingPopup(ModalOverlay):
             recent_logs = logs[-3:] 
             last_msg = recent_logs[-1].split("] ")[-1] if "]" in recent_logs[-1] else recent_logs[-1]
             self.lbl_log.config(text=last_msg[:45]) 
-            
             for l in recent_logs:
                 if "HOME" in l and not self.homing_seen:
                     self.homing_seen = True
                     self.lbl_title.config(text="MOVING...")
-                    # --- BOLD SYMBOL ⦻ ---
-                    self.lbl_icon.config(text="⦻", font=("Arial", 40, "bold")) 
+                    # --- FIX: Reduced font size from 40 to 32 ---
+                    self.lbl_icon.config(text="⦻", font=("Arial", 32, "bold")) 
                     self.lbl_desc.config(text="Moving to calibration Point...")
-            
             if self.homing_seen:
                 for l in recent_logs:
                     if "RX: X" in l or "RX:X" in l:
@@ -392,7 +371,6 @@ class Calibrate(tk.Frame):
         # --- NEW HELPER FOR INTERACTIVE BUTTONS ---
         def mk_btn(parent, txt, axis, d): 
             b = RoundedButton(parent, text=txt, command=None, width=78, height=65, bg_color=CLR_INACTIVE, hover_color="#B0BEC5", fg_color="black")
-            # Assign command manually to pass 'b' (self) to the function
             b.command = lambda: self.move(axis, d, b)
             return b
         
@@ -441,8 +419,9 @@ class Calibrate(tk.Frame):
         self.set_step(1.0) 
 
         footer = tk.Frame(self, bg=CLR_BG, height=70); footer.pack(side="bottom", fill="x", pady=(2, 10), padx=20)
-        RoundedButton(footer, text="EXIT", command=lambda: controller.show_frame("Home"), width=120, height=60, bg_color="#9E9E9E", hover_color="#757575").pack(side="left")
-        RoundedButton(footer, text="SAVE", command=self.save_offsets, width=120, height=60, bg_color=CLR_SUCCESS, hover_color=CLR_SUCCESS_HOVER).pack(side="right")
+        
+        RoundedButton(footer, text="EXIT", command=self.confirm_exit, width=120, height=60, bg_color="#9E9E9E", hover_color="#757575").pack(side="left")
+        RoundedButton(footer, text="SAVE", command=self.confirm_save, width=120, height=60, bg_color=CLR_SUCCESS, hover_color=CLR_SUCCESS_HOVER).pack(side="right")
 
     def set_step(self, val):
         self.c.step_size.set(val)
@@ -459,49 +438,73 @@ class Calibrate(tk.Frame):
 
     # --- UPDATED MOVE FUNCTION WITH ANIMATION ---
     def move(self, axis, direction, btn_instance):
-        # 1. Flash Button Blue
         btn_instance.flash(CLR_PRIMARY)
-        
-        # 2. Logic
         step = self.c.step_size.get() * direction
         dx, dy, dz1, dz2 = 0, 0, 0, 0
         current = self.c.offsets[axis].get(); new_val = round(current + step, 2); self.c.offsets[axis].set(new_val)
         
-        target_lbl = None
+        target_lbl, axis_prefix = None, ""
         if axis == "X": 
-            self.lbl_x.config(text=f"X : {new_val}"); dx = step; target_lbl = self.lbl_x
+            axis_prefix = "X : "; target_lbl = self.lbl_x; dx = step
         elif axis == "Y": 
-            self.lbl_y.config(text=f"Y : {new_val}"); dy = step; target_lbl = self.lbl_y
+            axis_prefix = "Y : "; target_lbl = self.lbl_y; dy = step
         elif axis == "Z1": 
-            self.lbl_z1.config(text=f"Z1: {new_val}"); dz1 = step; target_lbl = self.lbl_z1
+            axis_prefix = "Z1: "; target_lbl = self.lbl_z1; dz1 = step
         elif axis == "Z2": 
-            self.lbl_z2.config(text=f"Z2: {new_val}"); dz2 = step; target_lbl = self.lbl_z2
+            axis_prefix = "Z2: "; target_lbl = self.lbl_z2; dz2 = step
         
-        # 3. Floating Text Animation
         txt_sign = f"+{step}" if step > 0 else f"{step}"
         self.float_animation(target_lbl, txt_sign)
+        self.animate_counter(target_lbl, axis_prefix, current, new_val)
 
         self.c.backend.ui_send_gcode(f"C dx={dx}, dy={dy}, dz1={dz1}, dz2={dz2}")
 
     def float_animation(self, target_widget, text):
-        # Create label on top of the info box
         lbl = tk.Label(self.info_box, text=text, fg=CLR_SUCCESS, bg=CLR_INFO_BOX, font=("Arial", 12, "bold"))
-        # Position it to the right of the target label
-        x = target_widget.winfo_x() + 150 # Shift right
+        x = target_widget.winfo_x() + 150 
         y = target_widget.winfo_y()
         lbl.place(x=x, y=y)
         
         def anim_loop(step=0):
             if step < 10:
-                lbl.place(y=y - step*2) # Move Up
+                lbl.place(y=y - step*2) 
                 self.after(30, lambda: anim_loop(step+1))
             else:
-                lbl.destroy() # Fade out (delete)
+                lbl.destroy() 
         anim_loop()
 
-    def save_offsets(self):
-        self.c.backend.ui_send_gcode("OK_C")
-        popup = CustomPopup(self.c, "Saved", "CALIBRATION SAVED", "Offsets stored successfully.", CLR_SUCCESS, "✔"); self.wait_window(popup); self.c.show_frame("Home")
+    # --- NEW: VALUE COUNTER ANIMATION ---
+    def animate_counter(self, lbl, prefix, start, end, step_count=10):
+        diff = end - start
+        step_size = diff / step_count
+        
+        def update_step(i):
+            if i <= step_count:
+                current = start + (step_size * i)
+                # Text turns GREEN during animation
+                lbl.config(text=f"{prefix}{current:.1f}", fg=CLR_SUCCESS) 
+                self.after(15, lambda: update_step(i+1))
+            else:
+                # Text returns to DARK GRAY when finished
+                lbl.config(text=f"{prefix}{end:.1f}", fg="#333")
+        
+        update_step(1)
+
+    # --- NEW CONFIRMATION METHODS ---
+    def confirm_exit(self):
+        c = CustomConfirmPopup(self.c, "Exit?", "EXIT CALIBRATION", "Unsaved changes will be lost.")
+        if c.result:
+            self.c.show_frame("Home")
+
+    def confirm_save(self):
+        c = CustomConfirmPopup(self.c, "Save?", "SAVE OFFSETS", "Update calibration settings?")
+        if c.result:
+            self.update() # Fix for white background issue
+            self.c.backend.ui_send_gcode("OK_C")
+            # --- FIX: Height 300 to fix Button Overflow ---
+            popup = CustomPopup(self.c, "Saved", "SAVED", "Offsets updated successfully.", CLR_SUCCESS, "💾", height=300, icon_size=38)
+            self.wait_window(popup)
+            self.c.show_frame("Home")
 
 # --- PROTOCOL LIST (MODERN) ---
 class ProtocolList(tk.Frame):
