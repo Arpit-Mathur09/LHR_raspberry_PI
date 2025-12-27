@@ -11,6 +11,7 @@ KIOSK SETUP
 - Install required packages should be install in root
     sudo apt install --no-install-recommends xserver-xorg x11-xserver-utils xinit openbox chromium unclutter
 
+- Installation of fonts: sudo apt install fonts-unifont fonts-symbola
 
 
 ⚠️ Important Note:
