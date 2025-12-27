@@ -345,7 +345,7 @@ class Home(tk.Frame):
         super().__init__(parent, bg=CLR_BG)
         card = ShadowCard(self, bg=CLR_CARD)
         card.place(relx=0.5, rely=0.5, anchor="center", width=500, height=350)
-        tk.Label(card.inner, text="Liquid Handler v1.0", font=("Arial", 22, "bold"), bg=CLR_CARD).pack(pady=(30, 40))
+        tk.Label(card.inner, text="Liquid Handler v1.1", font=("Arial", 22, "bold"), bg=CLR_CARD).pack(pady=(30, 40))
         RoundedButton(card.inner, text="CALIBRATION", width=250, height=60, bg_color="#FF9800", hover_color=CLR_WARNING_HOVER, command=lambda: controller.show_frame("Calibrate")).pack(pady=15)
         RoundedButton(card.inner, text="RUN PROTOCOL", width=250, height=60, bg_color=CLR_PRIMARY, hover_color=CLR_PRIMARY_HOVER, command=lambda: controller.show_frame("ProtocolList")).pack(pady=15)
 
