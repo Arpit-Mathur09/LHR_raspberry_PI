@@ -1,4 +1,4 @@
-#version 1.1 Claibration screen + popup overlay + animation  + Protocol list Screen Updated
+#version 1.1 Runnig Screen updated
 import tkinter as tk
 from tkinter import ttk, messagebox
 import os
@@ -140,30 +140,77 @@ class HourglassSpinner(tk.Canvas):
             self.draw_hourglass(self.angle, 100) 
         self.after(50, self.animate)
 
-# --- PROGRESS BAR ---
+
+# --- PROGRESS BAR (Fixed for low percentages) ---
 class ModernProgressBar(tk.Canvas):
     def __init__(self, parent, width=600, height=30, bg_color=CLR_PROG_BG, fill_color=CLR_SUCCESS):
         super().__init__(parent, width=width, height=height, bg=CLR_CARD, highlightthickness=0)
-        self.w = width; self.h = height; self.fill_color = fill_color; self.bg_color = bg_color; self.current_pct = 0.0; self.target_pct = 0.0
+        self.w = width
+        self.h = height
+        self.fill_color = fill_color
+        self.bg_color = bg_color
+        self.current_pct = 0.0
+        self.target_pct = 0.0
+        
+        # Draw Background
         self.create_rounded_rect(0, 0, width, height, radius=height, fill=bg_color, tags="bg")
+        # Draw Fill (Empty initially)
         self.fill_id = self.create_rounded_rect(0, 0, 0, height, radius=height, fill=fill_color, tags="fill")
 
     def create_rounded_rect(self, x1, y1, x2, y2, radius=25, **kwargs):
-        points = [x1+radius, y1, x1+radius, y1, x2-radius, y1, x2-radius, y1, x2, y1, x2, y1+radius, x2, y1+radius, x2, y2-radius, x2, y2-radius, x2, y2, x2-radius, y2, x2-radius, y2, x1+radius, y2, x1+radius, y2, x1, y2, x1, y2-radius, x1, y2-radius, x1, y1+radius, x1, y1+radius, x1, y1]
+        points = [
+            x1+radius, y1,
+            x1+radius, y1,
+            x2-radius, y1,
+            x2-radius, y1,
+            x2, y1,
+            x2, y1+radius,
+            x2, y1+radius,
+            x2, y2-radius,
+            x2, y2-radius,
+            x2, y2,
+            x2-radius, y2,
+            x2-radius, y2,
+            x1+radius, y2,
+            x1+radius, y2,
+            x1, y2,
+            x1, y2-radius,
+            x1, y2-radius,
+            x1, y1+radius,
+            x1, y1+radius,
+            x1, y1
+        ]
         return self.create_polygon(points, **kwargs, smooth=True)
 
-    def set_progress(self, pct): self.target_pct = max(0, min(100, pct)); self.animate()
+    def set_progress(self, pct):
+        self.target_pct = max(0, min(100, pct))
+        self.animate()
 
     def animate(self):
         diff = self.target_pct - self.current_pct
-        if abs(diff) < 0.5: self.current_pct = self.target_pct
-        else: self.current_pct += diff * 0.1 
-        new_width = (self.current_pct / 100) * self.w; 
-        if new_width < self.h: new_width = 0 
-        self.delete("fill"); 
-        if new_width > 0: self.create_rounded_rect(0, 0, new_width, self.h, radius=self.h, fill=self.fill_color, tags="fill")
-        if self.current_pct != self.target_pct: self.after(20, self.animate)
+        if abs(diff) < 0.5:
+            self.current_pct = self.target_pct
+        else:
+            self.current_pct += diff * 0.1 
+        
+        # Calculate visual width
+        raw_width = (self.current_pct / 100) * self.w
+        
+        # --- FIX: VISIBILITY FOR LOW % ---
+        # If pct > 0.5% but the width is smaller than the height (diameter), 
+        # force the width to equal the height so we draw at least a circle.
+        if self.current_pct > 0.5:
+            new_width = max(self.h, raw_width)
+        else:
+            new_width = 0
 
+        self.delete("fill")
+        if new_width > 0: 
+            self.create_rounded_rect(0, 0, new_width, self.h, radius=self.h, fill=self.fill_color, tags="fill")
+        
+        if self.current_pct != self.target_pct:
+            self.after(20, self.animate)
+            
 # --- SCROLLABLE FRAME ---
 class ScrollableFrame(tk.Frame):
     def __init__(self, container, *args, **kwargs):
@@ -193,58 +240,88 @@ class ScrollableFrame(tk.Frame):
         if event.num == 4: self.canvas.yview_scroll(-1, "units")
         elif event.num == 5: self.canvas.yview_scroll(1, "units")
 
-# --- BACKGROUND GENERATOR ---
-def get_blur_bg(parent):
+# --- BACKGROUND GENERATOR (Fixed) ---
+def get_blur_bg(root_window):
     if not HAS_PIL: return None
     try:
-        x = parent.winfo_rootx(); y = parent.winfo_rooty(); w = parent.winfo_width(); h = parent.winfo_height()
+        # Capture the entire root window (which shows current screen)
+        x = root_window.winfo_rootx()
+        y = root_window.winfo_rooty()
+        w = root_window.winfo_width()
+        h = root_window.winfo_height()
+        
+        # Grab the screen area of the app
         img = ImageGrab.grab(bbox=(x, y, x+w, y+h))
+        
+        # Blur it (blend with white)
         white_layer = Image.new("RGB", img.size, (255, 255, 255))
-        blended = Image.blend(img, white_layer, 0.8) 
+        blended = Image.blend(img, white_layer, 0.85) # slightly more opaque for better readability
         return ImageTk.PhotoImage(blended)
-    except Exception as e: return None
+    except Exception as e: 
+        print(f"BG Error: {e}")
+        return None
 
-# --- BASE MODAL ---
+# --- BASE MODAL (Fixed) ---
 class ModalOverlay(tk.Toplevel):
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
         self.withdraw()
-        x = parent.winfo_rootx(); y = parent.winfo_rooty(); w = parent.winfo_width(); h = parent.winfo_height()
-        self.geometry(f"{w}x{h}+{x}+{y}"); self.overrideredirect(True); self.config(cursor="none")
-        self.bg_img = get_blur_bg(parent)
+        
+        # Use the root window (app) to get dimensions/pos
+        root = parent.winfo_toplevel()
+        x = root.winfo_rootx()
+        y = root.winfo_rooty()
+        w = root.winfo_width()
+        h = root.winfo_height()
+        
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.overrideredirect(True)
+        self.config(cursor="none")
+        
+        # Capture BG from Root (Current Screen)
+        self.bg_img = get_blur_bg(root)
+        
         self.cv = tk.Canvas(self, width=w, height=h, highlightthickness=0, bg="white")
         self.cv.pack(fill="both", expand=True)
         if self.bg_img: self.cv.create_image(0, 0, image=self.bg_img, anchor="nw")
         else: self.cv.configure(bg="#EEEEEE")
         
-        # --- FIX: Don't Grab Set Here ---
-        # self.lift(); self.grab_set() 
-        # Moved to subclasses to avoid "window not viewable" error
-        
         self.bind("<Button-1>", lambda e: self.config(cursor="none"))
 
-# --- POPUPS ---
 class CustomPopup(ModalOverlay):
-    def __init__(self, parent, title, header, message, color, icon_text, height=340, icon_size=50):
+    def __init__(self, parent, title, header, message, color, icon_text, height=290, icon_size=45):
         super().__init__(parent)
-        cw, ch = 420, height 
-        cx = parent.winfo_width() / 2; cy = parent.winfo_height() / 2
+        
+        # --- FIX: Decreased Width to 380 ---
+        cw, ch = 380, height 
+        cx = parent.winfo_width() / 2
+        cy = parent.winfo_height() / 2
+        
         self.cv.create_rectangle(cx - cw/2 + 6, cy - ch/2 + 6, cx + cw/2 + 6, cy + ch/2 + 6, fill=CLR_SHADOW, outline="")
         self.cv.create_rectangle(cx - cw/2, cy - ch/2, cx + cw/2, cy + ch/2, fill="white", outline=color, width=2)
-        self.f = tk.Frame(self.cv, bg="white", width=cw-4, height=ch-4); self.f.pack_propagate(False)
+        
+        self.f = tk.Frame(self.cv, bg="white", width=cw-4, height=ch-4)
         self.cv.create_window(cx, cy, window=self.f)
         
-        head_box = tk.Frame(self.f, bg="white"); head_box.pack(pady=(25, 5))
-        tk.Label(head_box, text=icon_text, font=("Arial", icon_size), fg=color, bg="white").pack(side="top", pady=(0, 5))
-        tk.Label(head_box, text=header, font=("Arial", 20, "bold"), fg=color, bg="white").pack(side="top")
-        tk.Frame(self.f, height=3, bg=color, width=320).pack(pady=10)
-        msg_frame = tk.Frame(self.f, bg="white"); msg_frame.pack(pady=5, padx=20)
-        for line in message.split("\n"): 
-            tk.Label(msg_frame, text=line, font=("Arial", 12), bg="white", fg="#444").pack(anchor="n")
-        btn_f = tk.Frame(self.f, bg="white"); btn_f.pack(side="bottom", pady=25)
-        RoundedButton(btn_f, text="OK", command=self.destroy, width=140, height=50, bg_color=color, hover_color=color).pack()
+        head_box = tk.Frame(self.f, bg="white")
+        head_box.pack(pady=(15, 2))
         
-        # --- FIX: Show and Grab here ---
+        tk.Label(head_box, text=icon_text, font=("Arial", icon_size), fg=color, bg="white").pack(side="top")
+        tk.Label(head_box, text=header, font=("Arial", 20, "bold"), fg=color, bg="white").pack(side="top")
+        
+        tk.Frame(self.f, height=3, bg=color, width=300).pack(pady=8)
+        
+        msg_frame = tk.Frame(self.f, bg="white")
+        msg_frame.pack(pady=2, padx=15)
+        
+        # Wraplength slightly smaller than cw (380 - padding)
+        tk.Label(msg_frame, text=message, font=("Arial", 12), bg="white", fg="#444", wraplength=340).pack(anchor="n")
+        
+        btn_f = tk.Frame(self.f, bg="white")
+        btn_f.pack(side="bottom", pady=20)
+        
+        RoundedButton(btn_f, text="OK", command=self.destroy, width=130, height=45, bg_color=color, hover_color=color).pack()
+        
         self.deiconify()
         self.update_idletasks()
         self.lift()
@@ -346,55 +423,137 @@ class HomingPopup(ModalOverlay):
 class KioskApp(tk.Tk):
     def __init__(self):
         super().__init__()
+        
+        # 1. Initialize Backend
         self.backend = backend.RobotClient()
         self.backend.start()
-        w, h = 800, 480; self.geometry(f"{w}x{h}"); self.update_idletasks()
-        x = (self.winfo_screenwidth() // 2) - (w // 2); y = (self.winfo_screenheight() // 2) - (h // 2)
-        self.geometry(f"{w}x{h}+{x}+{y}"); self.config(bg=CLR_BG, cursor="none")
+        
+        # 2. Window Setup
+        w, h = 800, 480
+        self.geometry(f"{w}x{h}")
+        x = (self.winfo_screenwidth() // 2) - (w // 2)
+        y = (self.winfo_screenheight() // 2) - (h // 2)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.config(bg=CLR_BG, cursor="none")
         
         self.bind("<Button-1>", lambda e: self.config(cursor="none"))
         self.bind("<FocusIn>", lambda e: self.config(cursor="none"))
 
-        style = ttk.Style(); style.theme_use("clam")
+        style = ttk.Style()
+        style.theme_use("clam")
         
         self.offsets = {"X": tk.DoubleVar(value=0.0), "Y": tk.DoubleVar(value=0.0), "Z1": tk.DoubleVar(value=0.0), "Z2": tk.DoubleVar(value=0.0)}
         self.step_size = tk.DoubleVar(value=1.0)
         self.selected_file = tk.StringVar(value="No File Selected")
         self.current_page_name = "Home"
-        container = tk.Frame(self, bg=CLR_BG); container.pack(fill="both", expand=True)
-        container.grid_rowconfigure(0, weight=1); container.grid_columnconfigure(0, weight=1)
+        
+        # 3. Frame Stack
+        container = tk.Frame(self, bg=CLR_BG)
+        container.pack(fill="both", expand=True)
+        container.grid_rowconfigure(0, weight=1)
+        container.grid_columnconfigure(0, weight=1)
+        
         self.frames = {}
-        for F in (Home, Calibrate, ProtocolList, Running):
-            page_name = F.__name__; frame = F(parent=container, controller=self)
-            self.frames[page_name] = frame; frame.grid(row=0, column=0, sticky="nsew")
-        self.show_frame("Home"); self.start_ui_updater()
+        
+        # --- FIX: Startup Flash ---
+        # We create 'Home' LAST. In Tkinter's grid, the last added widget 
+        # naturally sits on top until raised. This prevents other screens flashing.
+        for F in (Running, ProtocolList, Calibrate, Home): 
+            page_name = F.__name__
+            frame = F(parent=container, controller=self)
+            self.frames[page_name] = frame
+            frame.grid(row=0, column=0, sticky="nsew")
+        
+        # Force immediate update to lock in the view
+        self.show_frame("Home")
+        self.update() 
+        
+        self.start_ui_updater()
 
     def show_frame(self, page_name):
-        self.current_page_name = page_name; frame = self.frames[page_name]; frame.tkraise()
+        self.current_page_name = page_name
+        frame = self.frames[page_name]
+        frame.tkraise()
+        
         if page_name == "Calibrate": frame.on_enter()
         if page_name == "ProtocolList": frame.refresh_files(frame.current_dir)
 
     def start_ui_updater(self):
         state = self.backend.state
+        
+        # Sync Filename
         if "Running" in state["status"] or "Paused" in state["status"]:
-            if self.current_page_name != "Running": self.selected_file.set(state["filename"]); self.show_frame("Running")
-        if self.current_page_name == "Running": self.frames["Running"].update_view(state)
-        if state["stop_reason"]:
-            reason = state["stop_reason"].upper(); filename = state["filename"]; time_now = datetime.now().strftime("%H:%M:%S")
-            msg = f"File: {filename}\nSource: {reason}\nTime: {time_now}"
-            popup = CustomPopup(self, "Stopped", "PROTOCOL STOPPED", msg, CLR_WARNING, "⚠"); self.wait_window(popup); self.backend.ui_ack_stop(); self.show_frame("Home")
-        if state["error_msg"]:
-            error_text = state["error_msg"]; time_now = datetime.now().strftime("%H:%M:%S")
-            msg = f"Time: {time_now}\nDetails: {error_text}"
-            popup = CustomPopup(self, "System Error", "HARDWARE ERROR", msg, CLR_DANGER, "✖"); self.wait_window(popup); self.backend.ui_ack_error(); self.show_frame("Home")
-        if state["completed"]:
-            filename = state["filename"]; time_now = datetime.now().strftime("%H:%M:%S")
-            msg = f"File: {filename}\nFinished At: {time_now}"
-            if self.current_page_name == "Running":
-                popup = CustomPopup(self, "Done", "COMPLETED", msg, CLR_SUCCESS, "✔"); self.wait_window(popup); self.backend.ui_ack_stop(); self.show_frame("Home")
-            else: self.backend.state["completed"] = False; self.backend.ui_ack_stop()
-        self.after(200, self.start_ui_updater)
+            if self.selected_file.get() != state["filename"]:
+                self.selected_file.set(state["filename"])
 
+        # Remote Start Popup
+        if state["just_started"]:
+            self.show_frame("Running")
+            self.update_idletasks()
+            self.update()
+            
+            filename = state["filename"]
+            source = state["started_by"]
+            time_now = datetime.now().strftime("%H:%M:%S")
+            msg = f"Protocol: {filename}\nSource: {source}\nTime: {time_now}"
+            
+            popup = CustomPopup(self, "Started", "PROTOCOL STARTED", msg, CLR_PRIMARY, "🚀", height=290)
+            self.wait_window(popup)
+            self.backend.ui_ack_start()
+
+        # Update Views
+        if "Running" in state["status"] or "Paused" in state["status"] or "Done" in state["status"]:
+            if self.current_page_name != "Running": 
+                self.show_frame("Running")
+        
+        if self.current_page_name == "Running": 
+            self.frames["Running"].update_view(state)
+            
+        # Stop Popup
+        if state["stop_reason"]:
+            reason = state["stop_reason"].upper()
+            filename = state["filename"]
+            time_now = datetime.now().strftime("%H:%M:%S")
+            msg = f"File: {filename}\nSource: {reason}\nTime: {time_now}"
+            popup = CustomPopup(self, "Stopped", "PROTOCOL STOPPED", msg, CLR_WARNING, "⚠")
+            self.wait_window(popup)
+            self.backend.ui_ack_stop()
+            self.show_frame("Home")
+            
+        # Error Popup
+        if state["error_msg"]:
+            error_text = state["error_msg"]
+            time_now = datetime.now().strftime("%H:%M:%S")
+            msg = f"Time: {time_now}\nDetails: {error_text}"
+            popup = CustomPopup(self, "System Error", "HARDWARE ERROR", msg, CLR_DANGER, "✖")
+            self.wait_window(popup)
+            self.backend.ui_ack_error()
+            self.show_frame("Home")
+            
+        # --- FIX: SUCCESS POPUP LOGIC ---
+        if state["completed"]:
+            # 1. Force the Running Screen to update to 100% FIRST
+            self.frames["Running"].update_view(state)
+            self.update_idletasks()
+            self.update() # Forces the paint to happen immediately
+            
+            # 2. Prepare Popup
+            filename = state["filename"]
+            time_now = datetime.now().strftime("%H:%M:%S")
+            msg = f"File: {filename}\nFinished At: {time_now}"
+            
+            # 3. Show Popup
+            if self.current_page_name == "Running":
+                popup = CustomPopup(self, "Done", "COMPLETED", msg, CLR_SUCCESS, "✔")
+                self.wait_window(popup)
+                self.backend.ui_ack_stop()
+                self.show_frame("Home")
+            else: 
+                self.backend.state["completed"] = False
+                self.backend.ui_ack_stop()
+                
+        self.after(200, self.start_ui_updater)
+        
 # --- HOME SCREEN ---
 class Home(tk.Frame):
     def __init__(self, parent, controller):
@@ -622,7 +781,6 @@ class ScrollableFrame(tk.Frame):
         # Keep mousewheel for testing
         if event.num == 4: self.canvas.yview_scroll(-1, "units")
         elif event.num == 5: self.canvas.yview_scroll(1, "units")
-# --- FIXED PROTOCOL LIST ---
 # --- UPDATED PROTOCOL LIST ---
 class ProtocolList(tk.Frame):
     def __init__(self, parent, controller):
@@ -837,49 +995,131 @@ class ProtocolList(tk.Frame):
         if not self.selected_card: return
         fname = self.c.selected_file.get()
         self.c.backend.ui_load_and_run(fname)
-        self.c.show_frame("Running")
-        
-        
-# --- 4. RUNNING SCREEN (MODERN) ---
+        self.c.show_frame("Running")  
+
+# --- MODERN RUNNING SCREEN (Refined Layout) ---
 class Running(tk.Frame):
     def __init__(self, parent, controller):
-        super().__init__(parent, bg=CLR_CARD)
+        super().__init__(parent, bg=CLR_BG)
         self.c = controller
-        tk.Label(self, text="RUNNING PROTOCOL", font=("Arial", 12, "bold"), fg=CLR_INACTIVE, bg=CLR_CARD).pack(pady=(20, 0))
-        tk.Label(self, textvariable=controller.selected_file, font=("Arial", 18, "bold"), fg=CLR_PRIMARY, bg=CLR_CARD).pack(pady=5)
-        info_box = tk.Frame(self, bg=CLR_INFO_BOX, bd=2, relief="groove"); info_box.pack(pady=15, fill="x", padx=40)
-        tk.Label(info_box, text="Current Command:", font=("Arial", 10), bg=CLR_INFO_BOX, fg="gray").pack(pady=(10,0))
-        self.cmd_lbl = tk.Label(info_box, text="Waiting...", font=("Courier New", 18, "bold"), bg=CLR_INFO_BOX, fg="black"); self.cmd_lbl.pack(pady=5)
-        tk.Label(info_box, text="Description:", font=("Arial", 10), bg=CLR_INFO_BOX, fg="gray").pack(pady=(5,0))
-        self.desc_lbl = tk.Label(info_box, text="--", font=("Arial", 14, "italic"), fg="#37474F", bg=CLR_INFO_BOX); self.desc_lbl.pack(pady=(0, 10))
-        stats_frame = tk.Frame(self, bg=CLR_CARD); stats_frame.pack(fill="x", padx=50, pady=(15, 0))
-        self.percent_lbl = tk.Label(stats_frame, text="0%", font=("Arial", 28, "bold"), bg=CLR_CARD, fg=CLR_PRIMARY); self.percent_lbl.pack(side="left")
-        right_box = tk.Frame(stats_frame, bg=CLR_CARD); right_box.pack(side="right")
-        self.spinner = HourglassSpinner(right_box, size=30, bg=CLR_CARD); self.spinner.pack(side="left", padx=10)
-        self.time_lbl = tk.Label(right_box, text="Est: --:--:--:--", font=("Arial", 18, "bold"), bg=CLR_CARD, fg="#555"); self.time_lbl.pack(side="left")
-        self.prog = ModernProgressBar(self, width=700, height=25, fill_color=CLR_SUCCESS); self.prog.pack(pady=(5, 20))
-        footer = tk.Frame(self, bg=CLR_CARD); footer.pack(side="bottom", pady=30)
-        self.btn_pause = RoundedButton(footer, text="❚❚  PAUSE", command=lambda: self.c.backend.ui_pause_resume(), width=160, height=50, bg_color=CLR_WARNING, hover_color=CLR_WARNING_HOVER); self.btn_pause.pack(side="left", padx=20)
-        RoundedButton(footer, text="■  STOP", command=self.cancel_run, width=140, height=50, bg_color=CLR_DANGER, hover_color=CLR_DANGER_HOVER).pack(side="left", padx=20)
-        self.status_debug = tk.Label(self, text="Status: IDLE", font=("Arial", 10), bg=CLR_CARD, fg="gray"); self.status_debug.place(x=10, y=10)
+        
+        # --- 1. HEADER (Filename + Source) ---
+        header = tk.Frame(self, bg=CLR_BG)
+        header.pack(side="top", fill="x", pady=(20, 5), padx=50)
+        
+        # Filename (Hero Title)
+        self.lbl_filename = tk.Label(header, textvariable=controller.selected_file, font=("Arial", 20, "bold"), fg=CLR_PRIMARY, bg=CLR_BG, anchor="w")
+        self.lbl_filename.pack(fill="x")
+        
+        # Source (Directly Below Filename)
+        self.source_lbl = tk.Label(header, text="Source: --", font=("Arial", 11, "bold"), fg="#90A4AE", bg=CLR_BG, anchor="w")
+        self.source_lbl.pack(fill="x", pady=(2, 0))
+
+        # --- 2. MAIN CARD ---
+        card_outer = ShadowCard(self, bg="white")
+        card_outer.pack(fill="both", expand=True, padx=50, pady=(15, 10))
+        
+        main_inner = tk.Frame(card_outer.inner, bg="white", padx=30, pady=20)
+        main_inner.pack(fill="both", expand=True)
+
+        # --- A. INFO ROW (Percent Left, Time Right) ---
+        top_row = tk.Frame(main_inner, bg="white")
+        top_row.pack(fill="x", pady=(0, 10)) # Reduced bottom padding slightly
+        
+        # Big Percentage
+        self.percent_lbl = tk.Label(top_row, text="0%", font=("Arial", 48, "bold"), fg=CLR_PRIMARY, bg="white")
+        self.percent_lbl.pack(side="left")
+        
+        # Right Side Info
+        info_col = tk.Frame(top_row, bg="white")
+        info_col.pack(side="right", anchor="e")
+        
+        # 1. Status Badge
+        self.status_badge = tk.Label(info_col, text="● STARTING", font=("Arial", 11, "bold"), fg="#555", bg="#F5F5F5", padx=10, pady=5)
+        self.status_badge.pack(anchor="e", pady=(0, 2))
+        
+        # 2. Time & Hourglass Container
+        # ADDED TOP PADDING HERE (pady=(5, 0))
+        time_box = tk.Frame(info_col, bg="white")
+        time_box.pack(anchor="e", pady=(10, 0)) 
+        
+        # Hourglass Animation
+        self.spinner = HourglassSpinner(time_box, size=24, bg="white")
+        self.spinner.pack(side="left", padx=(0, 8))
+        
+        # Time Text
+        self.time_lbl = tk.Label(time_box, text="Est: --:--:--:--", font=("Arial", 14, "bold"), fg="#555", bg="white")
+        self.time_lbl.pack(side="left")
+
+        # Progress Bar
+        # DECREASED TOP PADDING HERE (pady=(2, 20))
+        self.prog = ModernProgressBar(main_inner, width=640, height=20, fill_color=CLR_PRIMARY)
+        self.prog.pack(pady=(2, 20))
+
+        # --- B. CONSOLE (Light Theme) ---
+        console_frame = tk.Frame(main_inner, bg="#F7F9FA", bd=1, relief="solid", highlightbackground="#ECEFF1", highlightthickness=1)
+        console_frame.pack(fill="both", expand=True, pady=(0, 5))
+        
+        c_inner = tk.Frame(console_frame, bg="#F7F9FA", padx=15, pady=10)
+        c_inner.pack(fill="both", expand=True)
+        
+        tk.Label(c_inner, text="CURRENT OPERATION:", font=("Arial", 9, "bold"), fg="#90A4AE", bg="#F7F9FA").pack(anchor="w")
+        
+        # Command Text
+        self.cmd_lbl = tk.Label(c_inner, text="Waiting...", font=("Courier New", 16, "bold"), fg="#263238", bg="#F7F9FA", anchor="w", wraplength=600, justify="left")
+        self.cmd_lbl.pack(fill="x", pady=(2, 0))
+        
+        # Description Text
+        self.desc_lbl = tk.Label(c_inner, text="--", font=("Arial", 12, "italic"), fg="#546E7A", bg="#F7F9FA", anchor="w", wraplength=600, justify="left")
+        self.desc_lbl.pack(fill="x", pady=(4, 0))
+
+        # --- 3. FOOTER ACTIONS ---
+        footer = tk.Frame(self, bg=CLR_BG, height=80)
+        footer.pack(side="bottom", fill="x", pady=(5, 20), padx=50)
+        
+        self.btn_pause = RoundedButton(footer, text="PAUSE", command=lambda: self.c.backend.ui_pause_resume(), width=150, height=55, bg_color=CLR_WARNING, hover_color=CLR_WARNING_HOVER)
+        self.btn_pause.pack(side="left")
+        
+        RoundedButton(footer, text="STOP", command=self.cancel_run, width=150, height=55, bg_color=CLR_DANGER, hover_color=CLR_DANGER_HOVER).pack(side="right")
+
     def cancel_run(self):
         confirm = CustomConfirmPopup(self.c, "Stop Confirmation", "STOP PROTOCOL", "Are you sure you want to abort?")
         if confirm.result: self.c.backend.ui_stop()
-    def update_view(self, state):
-        progress = state["progress"]; status = state["status"]; cmd_text = state["current_line"]; desc_text = state.get("current_desc", ""); est_time = state.get("est", "--:--:--:--")
-        self.status_debug.config(text=f"System Status: {status}")
-        self.prog.set_progress(progress); self.percent_lbl.config(text=f"{int(progress)}%"); self.time_lbl.config(text=f"Est: {est_time}")
-        is_paused = "Paused" in status; self.spinner.set_paused(is_paused)
-        if is_paused:
-            self.cmd_lbl.config(text=f"PAUSED ({state.get('pause_reason', 'UNKNOWN').upper()})", fg="red")
-            self.desc_lbl.config(text="Click Resume to continue...", fg="red")
-            self.btn_pause.itemconfig(self.btn_pause.text_id, text="▶  RESUME"); self.btn_pause.itemconfig(self.btn_pause.rect_id, fill=CLR_SUCCESS)
-            self.btn_pause.bg_color = CLR_SUCCESS; self.btn_pause.hover_color = CLR_SUCCESS_HOVER
-        else:
-            self.cmd_lbl.config(text=cmd_text, fg="black"); self.desc_lbl.config(text=desc_text, fg="#37474F")
-            self.btn_pause.itemconfig(self.btn_pause.text_id, text="❚❚  PAUSE"); self.btn_pause.itemconfig(self.btn_pause.rect_id, fill=CLR_WARNING)
-            self.btn_pause.bg_color = CLR_WARNING; self.btn_pause.hover_color = CLR_WARNING_HOVER
 
+    def update_view(self, state):
+        progress = state["progress"]
+        status = state["status"]
+        cmd_text = state["current_line"]
+        desc_text = state.get("current_desc", "")
+        est_time = state.get("est", "--:--:--:--")
+        source = state.get("started_by", "Unknown")
+        
+        self.source_lbl.config(text=f"Source: {source}")
+        self.percent_lbl.config(text=f"{int(progress)}%")
+        self.prog.set_progress(progress)
+        self.time_lbl.config(text=f"Est: {est_time}")
+        
+        is_paused = "Paused" in status
+        self.spinner.set_paused(is_paused)
+
+        if is_paused:
+            reason = state.get('pause_reason', 'UNKNOWN').upper()
+            self.status_badge.config(text=f"● PAUSED ({reason})", fg="#E65100", bg="#FFF3E0")
+            
+            self.cmd_lbl.config(text=f"PAUSED ({reason})", fg="#E65100")
+            self.desc_lbl.config(text="System waiting for resume...", fg="#BF360C")
+            
+            self.btn_pause.itemconfig(self.btn_pause.text_id, text="RESUME")
+            self.btn_pause.set_color(CLR_SUCCESS, CLR_SUCCESS_HOVER)
+        else:
+            self.status_badge.config(text="● RUNNING", fg=CLR_SUCCESS, bg="#E8F5E9")
+            
+            self.cmd_lbl.config(text=cmd_text, fg="#263238")
+            self.desc_lbl.config(text=desc_text if desc_text else "Processing...", fg="#546E7A")
+            
+            self.btn_pause.itemconfig(self.btn_pause.text_id, text="PAUSE")
+            self.btn_pause.set_color(CLR_WARNING, CLR_WARNING_HOVER)
+            
 if __name__ == "__main__":
     app = KioskApp()
     app.mainloop()
