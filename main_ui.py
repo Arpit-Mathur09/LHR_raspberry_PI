@@ -1,4 +1,4 @@
-#version 1.1 Claibration screen + popup overlay + animation   
+#version 1.1 Claibration screen + popup overlay + animation  + Protocol list Screen Updated
 import tkinter as tk
 from tkinter import ttk, messagebox
 import os
@@ -18,9 +18,8 @@ except ImportError:
 BASE_DIR = "/home/lhr/Robot_Client"
 DIR_TEST = os.path.join(BASE_DIR, "test_protocols")
 DIR_RECENT = os.path.join(BASE_DIR, "recent_protocols")
-DIR_ICONS = os.path.join(BASE_DIR, "icons")
 
-for d in [DIR_TEST, DIR_RECENT, DIR_ICONS]: 
+for d in [DIR_TEST, DIR_RECENT]: 
     os.makedirs(d, exist_ok=True)
 
 # --- GLOBAL COLORS ---
@@ -44,6 +43,7 @@ CLR_INFO_BOX = "#ECEFF1"
 CLR_PROG_BG = "#E0E0E0" 
 CLR_SAND = "#FFD700"  
 CLR_GLASS = "#555555" 
+CLR_LIGHT_BLUE = "#E3F2FD" 
 
 # --- ROUNDED BUTTON ---
 class RoundedButton(tk.Canvas):
@@ -164,6 +164,35 @@ class ModernProgressBar(tk.Canvas):
         if new_width > 0: self.create_rounded_rect(0, 0, new_width, self.h, radius=self.h, fill=self.fill_color, tags="fill")
         if self.current_pct != self.target_pct: self.after(20, self.animate)
 
+# --- SCROLLABLE FRAME ---
+class ScrollableFrame(tk.Frame):
+    def __init__(self, container, *args, **kwargs):
+        super().__init__(container, *args, **kwargs)
+        self.canvas = tk.Canvas(self, bg=kwargs.get("bg", "white"), highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.scrollable_frame = tk.Frame(self.canvas, bg=kwargs.get("bg", "white"))
+
+        # Link scrollbar to canvas
+        self.scrollable_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.window_id = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        
+        # Ensure inner frame expands to full width
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.scrollbar.pack(side="right", fill="y")
+        
+        self.canvas.bind_all("<Button-4>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-5>", self._on_mousewheel)
+
+    def _on_canvas_configure(self, event):
+        self.canvas.itemconfig(self.window_id, width=event.width)
+
+    def _on_mousewheel(self, event):
+        if event.num == 4: self.canvas.yview_scroll(-1, "units")
+        elif event.num == 5: self.canvas.yview_scroll(1, "units")
+
 # --- BACKGROUND GENERATOR ---
 def get_blur_bg(parent):
     if not HAS_PIL: return None
@@ -187,7 +216,12 @@ class ModalOverlay(tk.Toplevel):
         self.cv.pack(fill="both", expand=True)
         if self.bg_img: self.cv.create_image(0, 0, image=self.bg_img, anchor="nw")
         else: self.cv.configure(bg="#EEEEEE")
-        self.lift(); self.grab_set()
+        
+        # --- FIX: Don't Grab Set Here ---
+        # self.lift(); self.grab_set() 
+        # Moved to subclasses to avoid "window not viewable" error
+        
+        self.bind("<Button-1>", lambda e: self.config(cursor="none"))
 
 # --- POPUPS ---
 class CustomPopup(ModalOverlay):
@@ -209,32 +243,46 @@ class CustomPopup(ModalOverlay):
             tk.Label(msg_frame, text=line, font=("Arial", 12), bg="white", fg="#444").pack(anchor="n")
         btn_f = tk.Frame(self.f, bg="white"); btn_f.pack(side="bottom", pady=25)
         RoundedButton(btn_f, text="OK", command=self.destroy, width=140, height=50, bg_color=color, hover_color=color).pack()
-        self.deiconify(); self.update_idletasks()
+        
+        # --- FIX: Show and Grab here ---
+        self.deiconify()
+        self.update_idletasks()
+        self.lift()
+        self.grab_set()
 
 class CustomConfirmPopup(ModalOverlay):
-    def __init__(self, parent, title, header, message):
+    def __init__(self, parent, title, header, message, width=420, height=240):
         super().__init__(parent); self.result = False
-        cw, ch = 400, 220  
-        cx = parent.winfo_width() / 2; cy = parent.winfo_height() / 2
+        
+        cw, ch = width, height
+        cx = parent.winfo_width() / 2
+        cy = parent.winfo_height() / 2
+        
+        # Shadow & Border
         self.cv.create_rectangle(cx - cw/2 + 6, cy - ch/2 + 6, cx + cw/2 + 6, cy + ch/2 + 6, fill=CLR_SHADOW, outline="")
         self.cv.create_rectangle(cx - cw/2, cy - ch/2, cx + cw/2, cy + ch/2, fill="white", outline=CLR_DANGER, width=2)
-        self.f = tk.Frame(self.cv, bg="white", width=cw-4, height=ch-4); self.f.pack_propagate(False)
+        
+        self.f = tk.Frame(self.cv, bg="white", width=cw-4, height=ch-4)
+        self.f.pack_propagate(False) # Keep fixed size requested
         self.cv.create_window(cx, cy, window=self.f)
         
-        head_box = tk.Frame(self.f, bg="white"); head_box.pack(pady=(10, 2))
-        tk.Label(head_box, text="?", font=("Arial", 42), fg=CLR_DANGER, bg="white").pack(side="top", pady=(0, 0))
+        # Content
+        head_box = tk.Frame(self.f, bg="white"); head_box.pack(pady=(15, 5))
+        tk.Label(head_box, text="?", font=("Arial", 40), fg=CLR_DANGER, bg="white").pack(side="top")
         tk.Label(head_box, text=header, font=("Arial", 18, "bold"), fg=CLR_DANGER, bg="white").pack(side="top")
-        tk.Frame(self.f, height=3, bg=CLR_DANGER, width=300).pack(pady=5)
-        tk.Label(self.f, text=message, font=("Arial", 12), bg="white", fg="#444").pack(pady=2)
         
-        btn_f = tk.Frame(self.f, bg="white"); btn_f.pack(side="bottom", pady=15)
-        RoundedButton(btn_f, text="CANCEL", command=self.on_cancel, width=110, height=45, bg_color="#9E9E9E", hover_color="#757575").pack(side="left", padx=10)
-        RoundedButton(btn_f, text="CONFIRM", command=self.on_confirm, width=110, height=45, bg_color=CLR_DANGER, hover_color=CLR_DANGER_HOVER).pack(side="left", padx=10)
+        tk.Frame(self.f, height=2, bg=CLR_DANGER, width=300).pack(pady=5)
+        tk.Label(self.f, text=message, font=("Arial", 12), bg="white", fg="#444", wraplength=cw-40).pack(pady=5)
         
-        self.deiconify(); self.update_idletasks(); self.wait_window()
+        # Buttons
+        btn_f = tk.Frame(self.f, bg="white"); btn_f.pack(side="bottom", pady=20)
+        RoundedButton(btn_f, text="CANCEL", command=self.on_cancel, width=120, height=50, bg_color="#9E9E9E", hover_color="#757575").pack(side="left", padx=15)
+        RoundedButton(btn_f, text="CONFIRM", command=self.on_confirm, width=120, height=50, bg_color=CLR_DANGER, hover_color=CLR_DANGER_HOVER).pack(side="left", padx=15)
+        
+        self.deiconify(); self.lift(); self.grab_set(); self.wait_window()
+        
     def on_confirm(self): self.result = True; self.destroy()
     def on_cancel(self): self.result = False; self.destroy()
-
 # --- HOMING POPUP ---
 class HomingPopup(ModalOverlay):
     def __init__(self, parent, controller):
@@ -265,7 +313,14 @@ class HomingPopup(ModalOverlay):
         log_box.pack(pady=10, padx=20, fill="x")
         self.lbl_log = tk.Label(log_box, text="Waiting...", font=("Courier", 10), bg="#F5F5F5", fg="#333")
         self.lbl_log.pack(pady=5)
-        self.deiconify(); self.update_idletasks(); self.monitor()
+        
+        # --- FIX: Show and Grab here ---
+        self.deiconify()
+        self.update_idletasks()
+        self.lift()
+        # Note: We don't grab_set homing usually to allow background update, but if you want modal:
+        # self.grab_set() 
+        self.monitor()
 
     def monitor(self):
         logs = self.c.backend.state["logs"]
@@ -277,7 +332,6 @@ class HomingPopup(ModalOverlay):
                 if "HOME" in l and not self.homing_seen:
                     self.homing_seen = True
                     self.lbl_title.config(text="MOVING...")
-                    # --- FIX: Reduced font size from 40 to 32 ---
                     self.lbl_icon.config(text="⦻", font=("Arial", 32, "bold")) 
                     self.lbl_desc.config(text="Moving to calibration Point...")
             if self.homing_seen:
@@ -297,10 +351,12 @@ class KioskApp(tk.Tk):
         w, h = 800, 480; self.geometry(f"{w}x{h}"); self.update_idletasks()
         x = (self.winfo_screenwidth() // 2) - (w // 2); y = (self.winfo_screenheight() // 2) - (h // 2)
         self.geometry(f"{w}x{h}+{x}+{y}"); self.config(bg=CLR_BG, cursor="none")
+        
+        self.bind("<Button-1>", lambda e: self.config(cursor="none"))
+        self.bind("<FocusIn>", lambda e: self.config(cursor="none"))
+
         style = ttk.Style(); style.theme_use("clam")
-        style.configure("Treeview", background="white", foreground=CLR_TEXT, rowheight=50, font=("Arial", 14))
-        style.configure("Treeview.Heading", font=('Arial', 14, 'bold'))
-        style.map('Treeview', background=[('selected', CLR_PRIMARY)])
+        
         self.offsets = {"X": tk.DoubleVar(value=0.0), "Y": tk.DoubleVar(value=0.0), "Z1": tk.DoubleVar(value=0.0), "Z2": tk.DoubleVar(value=0.0)}
         self.step_size = tk.DoubleVar(value=1.0)
         self.selected_file = tk.StringVar(value="No File Selected")
@@ -481,11 +537,9 @@ class Calibrate(tk.Frame):
         def update_step(i):
             if i <= step_count:
                 current = start + (step_size * i)
-                # Text turns GREEN during animation
                 lbl.config(text=f"{prefix}{current:.1f}", fg=CLR_SUCCESS) 
                 self.after(15, lambda: update_step(i+1))
             else:
-                # Text returns to DARK GRAY when finished
                 lbl.config(text=f"{prefix}{end:.1f}", fg="#333")
         
         update_step(1)
@@ -499,49 +553,293 @@ class Calibrate(tk.Frame):
     def confirm_save(self):
         c = CustomConfirmPopup(self.c, "Save?", "SAVE OFFSETS", "Update calibration settings?")
         if c.result:
-            self.update() # Fix for white background issue
+            self.update() 
             self.c.backend.ui_send_gcode("OK_C")
-            # --- FIX: Height 300 to fix Button Overflow ---
             popup = CustomPopup(self.c, "Saved", "SAVED", "Offsets updated successfully.", CLR_SUCCESS, "💾", height=300, icon_size=38)
             self.wait_window(popup)
             self.c.show_frame("Home")
 
-# --- PROTOCOL LIST (MODERN) ---
+# --- UPDATED SCROLLABLE FRAME (Hidden Scrollbar + Touch Drag) ---
+class ScrollableFrame(tk.Frame):
+    def __init__(self, container, *args, **kwargs):
+        super().__init__(container, *args, **kwargs)
+        
+        self.canvas = tk.Canvas(self, bg=kwargs.get("bg", "white"), highlightthickness=0)
+        self.scrollable_frame = tk.Frame(self.canvas, bg=kwargs.get("bg", "white"))
+
+        self.scrollable_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.window_id = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.canvas.pack(side="left", fill="both", expand=True)
+
+        # Variables for custom scrolling
+        self.last_y = 0
+
+    def _on_canvas_configure(self, event):
+        self.canvas.itemconfig(self.window_id, width=event.width)
+
+    # --- CUSTOM SCROLL LOGIC (CLAMPED) ---
+    def _start_scroll(self, event):
+        self.last_y = event.y
+
+    def _do_scroll(self, event):
+        # 1. Calculate how far mouse moved
+        dy = event.y - self.last_y
+        self.last_y = event.y
+        
+        # 2. Get Canvas Dimensions
+        # bbox returns (x1, y1, x2, y2) -> y2 is the total height of content
+        bbox = self.canvas.bbox("all")
+        if not bbox: return
+        content_height = bbox[3]
+        view_height = self.canvas.winfo_height()
+        
+        # If content fits in view, no scrolling needed
+        if content_height <= view_height: return
+
+        # 3. Calculate Scroll Fraction
+        # dy is pixels. We need to convert pixels to a 0.0-1.0 fraction relative to content height
+        # We multiply by roughly 1.5 to make the scroll feel responsive (sensitivity)
+        fraction = -dy / float(content_height) 
+        
+        # 4. Apply Scroll with Clamping
+        current_top, _ = self.canvas.yview()
+        new_top = current_top + fraction
+        
+        # CLAMP: Prevent going below 0 (Top) or above Max (Bottom)
+        if new_top < 0: 
+            new_top = 0
+        
+        # Max scroll is 1.0 minus the visible proportion
+        max_scroll = 1.0 - (view_height / content_height)
+        if new_top > max_scroll: 
+            new_top = max_scroll
+            
+        self.canvas.yview_moveto(new_top)
+
+    def _on_mousewheel(self, event):
+        # Keep mousewheel for testing
+        if event.num == 4: self.canvas.yview_scroll(-1, "units")
+        elif event.num == 5: self.canvas.yview_scroll(1, "units")
+# --- FIXED PROTOCOL LIST ---
+# --- UPDATED PROTOCOL LIST ---
 class ProtocolList(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent, bg=CLR_BG)
-        self.c = controller; self.current_dir = DIR_TEST; self.icon_file = None
-        try: f_path = os.path.join(DIR_ICONS, "file.png"); self.icon_file = tk.PhotoImage(file=f_path).subsample(15, 15) 
-        except: pass
-        footer = tk.Frame(self, bg="white", height=80); footer.pack(side="bottom", fill="x", pady=10)
-        RoundedButton(footer, text="<< BACK", command=lambda: controller.show_frame("Home"), width=120, height=50, bg_color=CLR_INACTIVE, hover_color=CLR_INACTIVE_HOVER, fg_color="black").pack(side="left", padx=20)
-        RoundedButton(footer, text="START >>", command=self.load_and_run, width=120, height=50, bg_color=CLR_SUCCESS, hover_color=CLR_SUCCESS_HOVER).pack(side="right", padx=20)
-        header = tk.Frame(self, bg=CLR_BG); header.pack(side="top", fill="x", pady=10, padx=20)
-        self.btn_test = tk.Button(header, text="TEST PROTOCOLS", font=("Arial", 13, "bold"), height=2, relief="flat", command=lambda: self.switch_tab("TEST"))
-        self.btn_test.pack(side="left", fill="x", expand=True, padx=(0, 2))
-        self.btn_recent = tk.Button(header, text="RECENT FILES", font=("Arial", 13, "bold"), height=2, relief="flat", command=lambda: self.switch_tab("RECENT"))
-        self.btn_recent.pack(side="left", fill="x", expand=True, padx=(2, 0))
-        list_frame = ShadowCard(self, bg="white"); list_frame.pack(side="top", fill="both", expand=True, padx=20, pady=(0, 10))
-        self.tree = ttk.Treeview(list_frame.inner, columns=("name"), show="tree", selectmode="browse"); self.tree.column("#0", anchor="w"); self.tree.pack(side="left", fill="both", expand=True)
-        sb = ttk.Scrollbar(list_frame.inner, orient="vertical", command=self.tree.yview); sb.pack(side="right", fill="y"); self.tree.configure(yscrollcommand=sb.set); self.switch_tab("TEST")
+        self.c = controller
+        self.current_dir = DIR_TEST
+        
+        # --- LOAD ICONS ---
+        self.del_icon_img = None
+        if HAS_PIL:
+            try:
+                icon_path = os.path.join(BASE_DIR, "icons", "delete.png")
+                pil_img = Image.open(icon_path)
+                pil_img = pil_img.resize((24, 24), Image.Resampling.LANCZOS)
+                self.del_icon_img = ImageTk.PhotoImage(pil_img)
+            except Exception as e:
+                print(f"⚠️ Could not load delete.png: {e}")
+
+        # --- 1. HEADER ---
+        header = tk.Frame(self, bg=CLR_BG, pady=5)
+        header.pack(side="top", fill="x", pady=(20, 5)) 
+        tk.Label(header, text="SYSTEM PROTOCOLS", font=("Arial", 16, "bold"), bg=CLR_BG, fg=CLR_PRIMARY).pack(side="left", padx=30)
+
+        # --- 2. TABS ROW ---
+        tabs_container = tk.Frame(self, bg=CLR_BG)
+        tabs_container.pack(side="top", fill="x", pady=(10, 10), padx=30)
+        
+        # Helper to create tab
+        def create_tab(parent, icon, text, tab_type, default_bg, default_fg):
+            f = tk.Frame(parent, bg=default_bg, pady=8, cursor="none")
+            c = tk.Frame(f, bg=default_bg, cursor="none")
+            c.pack(anchor="center")
+            
+            lbl_icon = tk.Label(c, text=icon, font=("Arial", 26), bg=default_bg, fg=default_fg, cursor="none")
+            lbl_icon.pack(side="left", padx=(0, 8))
+            
+            lbl_text = tk.Label(c, text=text, font=("Arial", 14, "bold"), bg=default_bg, fg=default_fg, cursor="none")
+            lbl_text.pack(side="left")
+            
+            for w in [f, c, lbl_icon, lbl_text]:
+                w.bind("<Button-1>", lambda e: self.switch_tab(tab_type))
+            return f, lbl_icon, lbl_text
+
+        self.tab_test_frame, self.tab_test_icon, self.tab_test_text = create_tab(
+            tabs_container, "🔬", "TEST PROTOCOLS", "TEST", CLR_PRIMARY, "white"
+        )
+        self.tab_test_frame.pack(side="left", fill="x", expand=True, padx=(0, 10))
+
+        self.tab_recent_frame, self.tab_recent_icon, self.tab_recent_text = create_tab(
+            tabs_container, "🕒", "RECENT FILES", "RECENT", CLR_INACTIVE, "#555"
+        )
+        self.tab_recent_frame.pack(side="left", fill="x", expand=True, padx=(10, 0))
+
+        # --- 3. FOOTER (With State-Controlled Start Button) ---
+        footer = tk.Frame(self, bg=CLR_BG, height=80)
+        footer.pack(side="bottom", fill="x", pady=(10, 25), padx=30)
+        
+        # BACK Button (No Arrows)
+        RoundedButton(footer, text="BACK", command=lambda: controller.show_frame("Home"), width=120, height=50, bg_color="#90A4AE", hover_color="#78909C", fg_color="white").pack(side="left")
+        
+        # START Button (No Arrows, kept as class variable to modify state)
+        self.btn_start = RoundedButton(footer, text="START", command=self.load_and_run, width=120, height=50, bg_color=CLR_SUCCESS, hover_color=CLR_SUCCESS_HOVER)
+        self.btn_start.pack(side="right")
+
+        # --- 4. LIST CONTAINER ---
+        list_outer = ShadowCard(self, bg="white")
+        list_outer.pack(side="top", fill="both", expand=True, padx=30, pady=(0, 10))
+        
+        self.scroll_frame_widget = ScrollableFrame(list_outer.inner, bg="white")
+        self.scroll_frame_widget.pack(fill="both", expand=True)
+        
+        self.selected_card = None
+        self.switch_tab("TEST") # This will also disable the start button initially
+
+    def toggle_start_button(self, enable):
+        """Disables or Enables the Start Button visually and functionally"""
+        if enable:
+            self.btn_start.set_color(CLR_SUCCESS, CLR_SUCCESS_HOVER)
+            self.btn_start.command = self.load_and_run
+        else:
+            self.btn_start.set_color(CLR_INACTIVE, CLR_INACTIVE) # Gray, no hover
+            self.btn_start.command = None # Remove command
+
     def switch_tab(self, tab_name):
         self.current_dir = DIR_TEST if tab_name == "TEST" else DIR_RECENT
-        self.btn_test.config(bg=CLR_PRIMARY if tab_name == "TEST" else CLR_INACTIVE, fg="white" if tab_name == "TEST" else "black")
-        self.btn_recent.config(bg=CLR_PRIMARY if tab_name == "RECENT" else CLR_INACTIVE, fg="white" if tab_name == "RECENT" else "black")
+        
+        if tab_name == "TEST":
+            self.set_tab_style(self.tab_test_frame, self.tab_test_icon, self.tab_test_text, True)
+            self.set_tab_style(self.tab_recent_frame, self.tab_recent_icon, self.tab_recent_text, False)
+        else:
+            self.set_tab_style(self.tab_test_frame, self.tab_test_icon, self.tab_test_text, False)
+            self.set_tab_style(self.tab_recent_frame, self.tab_recent_icon, self.tab_recent_text, True)
+            
         self.refresh_files(self.current_dir)
-    def refresh_files(self, folder_path):
-        for item in self.tree.get_children(): self.tree.delete(item)
-        try:
-            for f in sorted(os.listdir(folder_path)):
-                if f.endswith(('.g', '.nc', '.gc', '.gcode', '.txt')):
-                    if self.icon_file: self.tree.insert("", "end", iid=f, text=f"  {f}", image=self.icon_file)
-                    else: self.tree.insert("", "end", iid=f, text=f"  [FILE]  {f}")
-        except: pass
-    def load_and_run(self):
-        sel = self.tree.selection()
-        if not sel: return
-        self.c.selected_file.set(sel[0]); self.c.backend.ui_load_and_run(sel[0]); self.c.show_frame("Running")
 
+    def set_tab_style(self, frame, icon, text, active):
+        bg = CLR_PRIMARY if active else CLR_INACTIVE
+        fg = "white" if active else "#555"
+        
+        frame.config(bg=bg)
+        frame.winfo_children()[0].config(bg=bg) 
+        icon.config(bg=bg, fg=fg)
+        text.config(bg=bg, fg=fg)
+
+    def refresh_files(self, folder_path):
+        # Reset scroll
+        self.scroll_frame_widget.canvas.yview_moveto(0)
+        self.scroll_frame_widget.last_y = 0 
+        
+        # Reset Selection and Disable Start Button
+        self.selected_card = None
+        self.toggle_start_button(False)
+
+        target_frame = self.scroll_frame_widget.scrollable_frame
+        
+        for widget in target_frame.winfo_children():
+            widget.destroy()
+        
+        self.scroll_frame_widget.update_idletasks()
+        
+        try:
+            files = sorted([f for f in os.listdir(folder_path) if f.endswith(('.g', '.nc', '.gc', '.gcode', '.txt'))])
+            if not files:
+                tk.Label(target_frame, text="No protocols found.", font=("Arial", 14), bg="white", fg="gray").pack(pady=40)
+                return
+
+            for f in files:
+                self.create_file_card(f, target_frame)
+        except Exception as e:
+            print(f"Error refreshing files: {e}")
+
+    def create_file_card(self, filename, parent_frame):
+        card = tk.Frame(parent_frame, bg="white", bd=1, relief="solid")
+        card.pack(fill="x", padx=10, pady=6)
+        
+        inner = tk.Frame(card, bg="white", padx=15, pady=15)
+        inner.pack(fill="both", expand=True)
+        
+        # 1. Delete Button
+        del_btn = None
+        if self.current_dir == DIR_RECENT:
+            if self.del_icon_img:
+                del_btn = tk.Label(inner, image=self.del_icon_img, bg="white", cursor="none")
+                del_btn.image = self.del_icon_img
+            else:
+                del_btn = tk.Label(inner, text="X", font=("Arial", 18, "bold"), bg="white", fg=CLR_DANGER)
+            
+            del_btn.pack(side="right", padx=10)
+            del_btn.bind("<Button-1>", lambda e: self.delete_file(filename))
+
+        # 2. Selection Indicator
+        sel_lbl = tk.Label(inner, text="✔", font=("Arial", 18, "bold"), bg="white", fg=CLR_PRIMARY)
+        
+        # 3. File Icon
+        icon_lbl = tk.Label(inner, text="📄", font=("Arial", 22), bg="white", fg="#78909C", width=3)
+        icon_lbl.pack(side="left")
+        
+        # 4. Filename
+        name_lbl = tk.Label(inner, text=filename, font=("Helvetica", 14, "bold"), bg="white", fg="#263238", anchor="w")
+        name_lbl.pack(side="left", fill="x", expand=True, padx=5)
+
+        # 5. Logic
+        def on_click(e):
+            self.select_file(filename, card, inner, icon_lbl, name_lbl, sel_lbl, del_btn)
+
+        # 6. Bind Drag to ALL elements
+        for w in [card, inner, icon_lbl, name_lbl]:
+            w.bind("<ButtonPress-1>", self.scroll_frame_widget._start_scroll)
+            w.bind("<B1-Motion>", self.scroll_frame_widget._do_scroll)
+            w.bind("<ButtonRelease-1>", on_click)
+
+    def delete_file(self, filename):
+        c = CustomConfirmPopup(self.c, "Delete?", "DELETE FILE", f"Permanently delete\n{filename}?", width=480, height=280)
+        if c.result:
+            try:
+                os.remove(os.path.join(self.current_dir, filename))
+                self.refresh_files(self.current_dir)
+            except Exception as e:
+                print(f"Error deleting file: {e}")
+
+    def select_file(self, filename, card_frame, inner_frame, icon, name, sel_indicator, del_btn=None):
+        # Restore previous
+        if self.selected_card:
+            prev_card, prev_inner, prev_icon, prev_name, prev_sel, prev_del = self.selected_card
+            prev_card.config(bg="white")
+            prev_inner.config(bg="white")
+            prev_icon.config(bg="white", fg="#78909C") 
+            prev_name.config(bg="white")
+            prev_sel.pack_forget() 
+            if prev_del: 
+                prev_del.pack(side="right", padx=10)
+                prev_del.config(bg="white")
+
+        # Highlight New
+        card_frame.config(bg=CLR_LIGHT_BLUE)
+        inner_frame.config(bg=CLR_LIGHT_BLUE)
+        icon.config(bg=CLR_LIGHT_BLUE, fg=CLR_PRIMARY)
+        name.config(bg=CLR_LIGHT_BLUE)
+        
+        if del_btn: del_btn.pack_forget()
+
+        sel_indicator.config(bg=CLR_LIGHT_BLUE)
+        sel_indicator.pack(side="right", padx=10)
+        
+        self.c.selected_file.set(filename)
+        self.selected_card = (card_frame, inner_frame, icon, name, sel_indicator, del_btn)
+        
+        # ENABLE START BUTTON
+        self.toggle_start_button(True)
+
+    def load_and_run(self):
+        if not self.selected_card: return
+        fname = self.c.selected_file.get()
+        self.c.backend.ui_load_and_run(fname)
+        self.c.show_frame("Running")
+        
+        
 # --- 4. RUNNING SCREEN (MODERN) ---
 class Running(tk.Frame):
     def __init__(self, parent, controller):
