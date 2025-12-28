@@ -533,12 +533,19 @@ class KioskApp(tk.Tk):
 class Home(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent, bg=CLR_BG)
+        
+        # Reduced card height (350 -> 300) for less empty space
         card = ShadowCard(self, bg=CLR_CARD)
-        card.place(relx=0.5, rely=0.5, anchor="center", width=500, height=350)
-        tk.Label(card.inner, text="Liquid Handler v1.1", font=("Arial", 22, "bold"), bg=CLR_CARD).pack(pady=(30, 40))
-        RoundedButton(card.inner, text="CALIBRATION", width=250, height=60, bg_color="#FF9800", hover_color=CLR_WARNING_HOVER, command=lambda: controller.show_frame("Calibrate")).pack(pady=15)
-        RoundedButton(card.inner, text="RUN PROTOCOL", width=250, height=60, bg_color=CLR_PRIMARY, hover_color=CLR_PRIMARY_HOVER, command=lambda: controller.show_frame("ProtocolList")).pack(pady=15)
-
+        card.place(relx=0.5, rely=0.5, anchor="center", width=500, height=300)
+        
+        # Updated Version Label & Reduced Padding
+        tk.Label(card.inner, text="Liquid Handler v1.2", font=("Arial", 22, "bold"), bg=CLR_CARD).pack(pady=(20, 25))
+        
+        # Reduced button height & padding for tighter layout
+        RoundedButton(card.inner, text="CALIBRATION", width=250, height=55, bg_color="#FF9800", hover_color=CLR_WARNING_HOVER, command=lambda: controller.show_frame("Calibrate")).pack(pady=10)
+        
+        # Changed text "RUN PROTOCOL" -> "PROTOCOLS"
+        RoundedButton(card.inner, text="PROTOCOLS", width=250, height=55, bg_color=CLR_PRIMARY, hover_color=CLR_PRIMARY_HOVER, command=lambda: controller.show_frame("ProtocolList")).pack(pady=10)
 class Calibrate(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent, bg=CLR_BG)
