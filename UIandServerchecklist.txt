@@ -10,3 +10,23 @@ calibration
 logs
 
 check in ui
+Calibrtation Screen
+- Check the Homing moving popup
+- Exit and Save confirm menu
+- all button X Y Z Working with offset animation
+- steps radio
+- succesfully saved offeset popup
+- Error during calibration 
+
+Protocol list Screen
+- test and Rececnt protocol tab
+- scrollability 
+- delete option in recent protocol with confirmation popup
+
+Runnig Screen
+- Downloading and starte running the remote protocol
+- Paused by PICO , UI , Remotr
+- Stopped by Physical Button , UI , remote
+- check labelslike currentling status and description 
+- Stop confirmation, success , error popup
+
