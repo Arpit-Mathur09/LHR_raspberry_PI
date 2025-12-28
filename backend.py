@@ -1,6 +1,7 @@
-# v1.1 backend - Added "Started By" tracking and "Just Started" event
-# v1.1  backend - Fixes: Server Sync Source, Conditional Popup, Filename Handling
-# v1.1 backend - Terminology Fixes (User/System), Layout Stability
+# v1.2 backend - Added Calibration Locking Logic
+# v1.2 backend - Added Calibration Status Sequence (Homing -> Moving -> Ready)
+# v1.2 backend - Real Serial Synchronization for Calibration
+# v1.2 backend - Passive Calibration Sync (No Extra G-Code)
 import requests
 import serial
 import time
@@ -26,7 +27,13 @@ class RobotClient:
             "current_line": "Ready", "current_desc": "", "logs": [],            
             "est": "--:--:--:--", "connection": "Offline",
             "stop_reason": None, "pause_reason": None, "error_msg": None, 
-            "completed": False, "started_by": "Unknown", "just_started": False    
+            "completed": False, "started_by": "Unknown", "just_started": False,
+            
+            # --- CALIBRATION STATE ---
+            "calibration_active": False,
+            "calibration_source": None,
+            "calib_status": "Idle", # "Homing", "Moving", "Ready"
+            "is_calibrated": False
         }
         self.command_queue = queue.Queue()
         self.start_time = None; self.smoothed_seconds = 0
@@ -63,36 +70,18 @@ class RobotClient:
 
     def calculate_estimate(self):
         if not self.is_running or self.is_paused or not self.start_time: return
-        
         total = len(self.protocol_steps)
         if total == 0: return
-        
-        # Avoid division by zero
-        if self.ptr == 0: 
-            self.state["est"] = "Calculating..."
-            return
-
+        if self.ptr == 0: self.state["est"] = "Calculating..."; return
         progress_pct = (self.ptr / total) * 100
         self.state["progress"] = int(progress_pct)
-        
-        # Only calculate after 1% to stabilize
         if progress_pct > 1:
             elapsed = time.time() - self.start_time
-            
-            # Simple linear projection
-            estimated_total = elapsed / (progress_pct / 100.0)
-            remaining = estimated_total - elapsed
-            
-            # Smoothing: Combine old estimate (95%) with new (5%) to reduce jitter
-            if self.smoothed_seconds == 0: 
-                self.smoothed_seconds = remaining
-            else: 
-                self.smoothed_seconds = (0.95 * self.smoothed_seconds) + (0.05 * remaining)
-            
-            # formatting
+            raw_remaining = (elapsed / progress_pct) * (100 - progress_pct)
+            if self.smoothed_seconds == 0: self.smoothed_seconds = raw_remaining
+            else: self.smoothed_seconds = (0.95 * self.smoothed_seconds) + (0.05 * raw_remaining)
             self.state["est"] = self.format_time_dhms(self.smoothed_seconds)
-        else:
-            self.state["est"] = "Calculating..."
+        else: self.state["est"] = "Calculating..."
 
     def format_time_dhms(self, seconds):
         if seconds <= 0: return "00:00:00:00"
@@ -121,7 +110,12 @@ class RobotClient:
         payload = {
             "file": self.state["filename"], "line": line_txt, "progress": self.state["progress"],
             "est": self.state["est"], "status": self.state["status"], "logs": "\n".join(self.log_accumulator),
-            "started_by": self.state["started_by"] 
+            "started_by": self.state["started_by"],
+            # --- SYNC LOCK & STATUS ---
+            "calib_active": self.state["calibration_active"],
+            "calib_source": self.state["calibration_source"],
+            "calib_status": self.state["calib_status"],
+            "is_calibrated": self.state["is_calibrated"] # <--- ADD THIS
         }
         self.log_accumulator = [] 
         try:
@@ -140,6 +134,16 @@ class RobotClient:
         elif ev == "NEW_FILE": self.command_queue.put(("DOWNLOAD_AND_RUN", (cmd["filename"], "Remote"))) 
         elif ev == "SERIAL_SEND":
             if self.ser: self.log(f"TX (Remote): {cmd['data']}"); self.ser.write((cmd["data"] + "\n").encode())
+        # --- CALIB START (Remote) ---
+        elif ev == "CALIB_START": 
+            self.set_calibration_mode(True, "Remote")
+            # 1. Send Home Command
+            if self.ser: 
+                self.ser.write(b"T00\n")
+                self.state["calib_status"] = "Homing"
+                self.sync_with_server()
+        elif ev == "CALIB_END": 
+            self.set_calibration_mode(False, None)
 
     def parse_gcode_file(self, lines):
         steps = []; pending_desc = ""
@@ -190,16 +194,30 @@ class RobotClient:
         except Exception as e: self.log(f"❌ Download Failed: {e}")
 
     def ui_send_gcode(self, gcode): self.command_queue.put(("MANUAL", gcode))
-    def ui_load_and_run(self, filename): self.command_queue.put(("LOAD_LOCAL", (filename, "User"))) # CHANGED TO "User"
+    def ui_load_and_run(self, filename): self.command_queue.put(("LOAD_LOCAL", (filename, "User")))
     def ui_pause_resume(self): self.command_queue.put(("TOGGLE_PAUSE", None))
     def ui_stop(self): self.command_queue.put(("STOP", None))
     def ui_ack_start(self): self.state["just_started"] = False
     
+    def set_calibration_mode(self, active, source):
+        self.state["calibration_active"] = active
+        self.state["calibration_source"] = source
+        if active:
+            self.log(f"🔧 Calibration Started by {source}")
+            # Automatically set status to Homing so UI reacts immediately
+            self.state["calib_status"] = "Homing" 
+            self.sync_with_server()
+        else:
+            self.log("🔧 Calibration Ended")
+            self.state["calib_status"] = "Idle"
+            self.sync_with_server()
+
     def reset_all_state(self):
         self.state["stop_reason"] = None; self.state["completed"] = False; self.state["error_msg"] = None 
         self.state["filename"] = "None"; self.state["started_by"] = "Unknown" 
         self.state["status"] = "Idle"; self.state["current_line"] = "Ready"; self.state["current_desc"] = ""
         self.state["progress"] = 0; self.state["est"] = "--:--:--:--"
+        self.state["is_calibrated"] = False
 
     def ui_ack_stop(self): self.reset_all_state()
     def ui_ack_error(self): self.reset_all_state()
@@ -225,7 +243,7 @@ class RobotClient:
                     elif cmd_type == "DOWNLOAD_AND_RUN": fname, source = data; self.download_protocol(fname, source); waiting_for_response = False
                     
                     elif cmd_type == "STOP" or cmd_type == "REMOTE_STOP":
-                        source = "Remote" if cmd_type == "REMOTE_STOP" else "User" # CHANGED: UI -> User
+                        source = "Remote" if cmd_type == "REMOTE_STOP" else "User"
                         self.is_running = False; self.log(f"🛑 STOPPED ({source})")
                         last_file = self.state["filename"]; self.reset_all_state(); self.state["filename"] = last_file 
                         self.state["status"] = f"Stopped ({source})"; self.state["stop_reason"] = source 
@@ -239,12 +257,12 @@ class RobotClient:
                         self.is_paused = should_pause
                         
                         if self.is_paused:
-                            reason = "Remote" if cmd_type == "REMOTE_PAUSE" else "User" # CHANGED: UI -> User
+                            reason = "Remote" if cmd_type == "REMOTE_PAUSE" else "User"
                             self.state["pause_reason"] = reason; self.state["status"] = f"Paused ({reason})"
                             GPIO.output(self.PIN_PAUSE, 1); self.log(f"⏸ PAUSE ({reason})")
                         else:
-                            source = "Remote" if cmd_type == "REMOTE_RESUME" else "User" # CHANGED: UI -> User
-                            if self.state["pause_reason"] == "System": # CHANGED: Pico -> System
+                            source = "Remote" if cmd_type == "REMOTE_RESUME" else "User"
+                            if self.state["pause_reason"] == "System": 
                                 self.log(f"▶ RESUME ({source}) - Advancing Wait Command")
                                 self.ptr += 1; self.seq_num += 1; waiting_for_response = False 
                             else: self.log(f"▶ RESUME ({source})")
@@ -256,6 +274,33 @@ class RobotClient:
                     resp = self.ser.readline().decode().strip()
                     if resp: self.log(f"RX: {resp}")
 
+                    # --- HARDWARE SYNC LOGIC (CALIBRATION) ---
+                    if self.state["calibration_active"]:
+                        
+                        # 1. Homing Completed?
+                        if self.state["calib_status"] == "Homing":
+                            if "HOME" in resp: 
+                                self.state["calib_status"] = "Moving"
+                                self.sync_with_server()
+                        
+                        # 2. Moving Completed?
+                        elif self.state["calib_status"] == "Moving":
+                            if resp == "X": 
+                                self.state["calib_status"] = "Ready"
+                                self.sync_with_server()
+
+                        # 3. SAVE CONFIRMATION (Unlock Logic)
+                        # We listen for C_OK (or OK_C echo) to confirm save
+                        if "C_OK" in resp or "OK_C" in resp: 
+                            self.log("✅ Calibration Offsets Saved")
+                            
+                            # --- SET FLAG TRUE ---
+                            self.state["is_calibrated"] = True 
+                            
+                            self.set_calibration_mode(False, None) # Unlock
+                            # DO NOT call reset_all_state() here, or it will set is_calibrated back to False!
+                            self.sync_with_server()
+                            
                     if "Initialized" in resp:
                         if self.expect_reset: self.log("✅ Reset Confirmed"); self.expect_reset = False
                         else: 
@@ -267,15 +312,15 @@ class RobotClient:
                         if time.time() - self.connection_time < self.grace_period: self.log(f"⚠️ Ignored Startup Noise: {resp}")
                         else:
                             parts = resp.split(":", 1); clean_err = parts[1].strip() if len(parts) > 1 else "Unknown Hardware Error"
-                            self.log(f"❌ SYSTEM ERROR: {clean_err}") # CHANGED: PICO -> SYSTEM
+                            self.log(f"❌ SYSTEM ERROR: {clean_err}")
                             self.is_running = False; self.state["status"] = "Error"
                             self.state["error_msg"] = clean_err; self.state["current_line"] = "Error"; self.state["current_desc"] = "Halted"
                             self.state["est"] = "ERROR"; waiting_for_response = False; self.expect_reset = True; self.hard_reset_pico()
 
                     if self.is_running:
                         if "PAUSE" in resp:
-                            self.is_paused = True; self.state["status"] = "Paused (System)" # CHANGED: Pico -> System
-                            self.state["pause_reason"] = "System" # CHANGED: Pico -> System
+                            self.is_paused = True; self.state["status"] = "Paused (System)"
+                            self.state["pause_reason"] = "System"
                             self.log("⏸ System Paused (Wait Command)"); GPIO.output(self.PIN_PAUSE, 1) 
                         elif "OK" in resp: self.ptr += 1; self.seq_num += 1; waiting_for_response = False 
                 except: pass
