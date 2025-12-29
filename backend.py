@@ -8,7 +8,8 @@ import threading
 import queue
 import RPi.GPIO as GPIO
 from datetime import datetime, timedelta
-
+import subprocess
+import glob
 # --- CONFIGURATION ---
 SERVER_URL = "http://192.168.31.236:5000" 
 BASE_DIR = "/home/lhr/Robot_Client"
@@ -68,7 +69,171 @@ class RobotClient:
 
         self.is_running = False; self.is_paused = False
         self.protocol_steps = []; self.ptr = 0; self.seq_num = 1 
+        self.backlight_path = self._find_backlight_path()
+        self.max_brightness = self._get_max_brightness()
+        
+        # ... keep your existing socket/server connection code here ...
+        print(f"DEBUG: Backlight Path: {self.backlight_path}")
+        
+    def get_connected_ssid(self):
+        """Reliably gets the current WiFi SSID."""
+        # Method 1: Try 'iwgetid' (Standard on Raspberry Pi)
+        try:
+            # Output looks like: wlan0     ESSID:"MyWifiName"
+            output = subprocess.check_output(["iwgetid", "-r"], encoding="utf-8").strip()
+            if output: return output
+        except:
+            pass
+            
+        # Method 2: nmcli active connection check
+        try:
+            # Get active connection names
+            result = subprocess.check_output(
+                ["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show", "--active"], 
+                encoding="utf-8"
+            )
+            for line in result.split("\n"):
+                # active line looks like: MyWifiName:802-11-wireless
+                if "802-11-wireless" in line or "wifi" in line:
+                    return line.split(":")[0]
+        except:
+            pass
+            
+        return None
 
+    def get_wifi_networks(self):
+        """Forces a fresh scan and returns networks."""
+        
+        # 1. Get current SSID
+        current_ssid = self.get_connected_ssid()
+        if current_ssid: current_ssid = current_ssid.strip()
+        print(f"DEBUG: Active SSID is '{current_ssid}'")
+
+        try:
+            # --- FORCE RESCAN ---
+            # This tells the hardware to actually look for networks now.
+            # It connects asynchronously, so we wait a moment or just run it.
+            # 'nmcli dev wifi rescan' returns immediately but scan takes time.
+            print("DEBUG: Triggering hardware rescan...")
+            subprocess.run(["nmcli", "dev", "wifi", "rescan"], stderr=subprocess.DEVNULL)
+            
+            # Optional: Sleep briefly to allow scan to populate (0.5s - 1s)
+            import time
+            time.sleep(1) 
+            
+            # 2. READ RESULTS
+            cmd = ["nmcli", "-t", "-f", "SSID,SIGNAL", "dev", "wifi"]
+            result = subprocess.check_output(cmd, encoding="utf-8")
+            
+            unique_nets = {}
+            
+            for line in result.split("\n"):
+                if not line: continue
+                parts = line.split(":")
+                if len(parts) < 2: continue
+                
+                raw_ssid = ":".join(parts[:-1]) 
+                ssid = raw_ssid.strip()
+                if not ssid: continue 
+                
+                try: signal = int(parts[-1])
+                except: signal = 0
+                
+                is_connected = False
+                if current_ssid and ssid == current_ssid:
+                    is_connected = True
+                
+                if ssid not in unique_nets:
+                    unique_nets[ssid] = {"ssid": ssid, "signal": signal, "connected": is_connected}
+                else:
+                    if is_connected: unique_nets[ssid]["connected"] = True
+                    if signal > unique_nets[ssid]["signal"]:
+                        unique_nets[ssid]["signal"] = signal
+
+            networks = list(unique_nets.values())
+            networks.sort(key=lambda x: (not x["connected"], -x["signal"]))
+            return networks[:15]
+            
+        except Exception as e:
+            print(f"WiFi Scan Error: {e}")
+            return []   
+    
+    def connect_wifi(self, ssid, password):
+        print(f"Connecting to {ssid}...")
+        try:
+            subprocess.run(
+                ["nmcli", "dev", "wifi", "connect", ssid, "password", password],
+                check=True
+            )
+            return True
+        except subprocess.CalledProcessError:
+            return False
+    
+    def _find_backlight_path(self):
+        """Auto-detects the backlight controller path."""
+        # Common locations for Raspberry Pi DSI / GPIO displays
+        search_paths = [
+            "/sys/class/backlight/rpi_backlight",
+            "/sys/class/backlight/*", # Wildcard search for others
+        ]
+        
+        for p in search_paths:
+            matches = glob.glob(p)
+            for match in matches:
+                # Check if 'brightness' file exists inside
+                if os.path.exists(os.path.join(match, "brightness")):
+                    return match
+        return None
+
+    def _get_max_brightness(self):
+        """Reads the maximum hardware brightness value."""
+        if not self.backlight_path: return 255
+        try:
+            with open(os.path.join(self.backlight_path, "max_brightness"), "r") as f:
+                return int(f.read().strip())
+        except:
+            return 255
+
+    def get_brightness(self):
+        """Reads current brightness as a percentage (0-100)."""
+        if not self.backlight_path:
+            return 50 # Default fallback
+            
+        try:
+            with open(os.path.join(self.backlight_path, "brightness"), "r") as f:
+                val = int(f.read().strip())
+                
+            # Convert hardware value to percentage
+            pct = int((val / self.max_brightness) * 100)
+            return pct
+        except Exception as e:
+            print(f"Error reading brightness: {e}")
+            return 50
+
+    def set_brightness(self, level_pct):
+        """Sets brightness using the detected hardware limits."""
+        if not self.backlight_path:
+            self.log("⚠ No supported backlight controller found.")
+            return
+
+        try:
+            # Clamp percentage 5-100 (Prevent turning screen off completely)
+            level_pct = max(5, min(100, level_pct))
+            
+            # Calculate hardware value
+            val = int((level_pct / 100.0) * self.max_brightness)
+            
+            path = os.path.join(self.backlight_path, "brightness")
+            
+            with open(path, "w") as f:
+                f.write(str(val))
+            
+            # self.log(f"☀ Set to {level_pct}%") # Optional logging
+            
+        except PermissionError:
+            self.log("⚠ Permission Denied. Run: sudo chmod 777 " + os.path.join(self.backlight_path, "brightness"))
+        except Exception as e:
+            self.log(f"⚠ Brightness Error: {e}")
     # --- UPDATED: CLEANUP BOTH FOLDERS ---
     def cleanup_old_logs(self, days=7):
         print("🧹 Checking for old logs...", flush=True)
@@ -247,16 +412,11 @@ class RobotClient:
         self.state["calibration_active"] = active
         self.state["calibration_source"] = source
         if active:
-            # 1. Fix Naming: Change "User" -> "Local"
             clean_source = "Local" if source == "User" else source
-            
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             calib_name = f"Calibration_{clean_source}_{timestamp}"
             
-            # 2. Set as current "filename" so server knows where to log
             self.state["filename"] = calib_name
-            
-            # 3. Create actual log file on Pi (auto-routes to DIR_CALIB_LOGS)
             self.start_new_log_session(calib_name)
             
             self.log(f"🔧 Calibration Started by {clean_source}")
@@ -265,8 +425,14 @@ class RobotClient:
         else:
             self.log("🔧 Calibration Ended")
             self.state["calib_status"] = "Idle"
+            
+            # --- FIX: HARD RESET STATE ON EXIT ---
+            self.state["filename"] = "None" 
+            self.state["started_by"] = "Unknown"
+            self.state["status"] = "Idle"
+            
             self.sync_with_server()
-
+            
     def reset_all_state(self):
         self.state["stop_reason"] = None; self.state["completed"] = False; self.state["error_msg"] = None 
         self.state["filename"] = "None"; self.state["started_by"] = "Unknown" 

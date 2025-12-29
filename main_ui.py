@@ -1,14 +1,27 @@
-#v1.2 added Calibration Locking Logic and Status Popup Updates 
 import tkinter as tk
 from tkinter import ttk, messagebox
 import os
 import backend 
 from datetime import datetime
 import math
-
+import subprocess
+import time
+import functools
+import threading # Required for async scanning
+# --- DEBUGGING TOOL ---
+def profile(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        end_time = time.time()
+        duration = (end_time - start_time) * 1000 # Convert to milliseconds
+        print(f"⏱️ [{func.__name__}] took {duration:.2f} ms")
+        return result
+    return wrapper
 # --- TRY IMPORTING PIL ---
 try:
-    from PIL import Image, ImageTk, ImageGrab
+    from PIL import Image, ImageTk, ImageGrab, ImageFilter
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
@@ -32,19 +45,24 @@ CLR_INACTIVE = "#CFD8DC"
 CLR_INACTIVE_HOVER = "#B0BEC5"      
 CLR_SUCCESS = "#4CAF50"
 CLR_SUCCESS_HOVER = "#388E3C"
-CLR_SUCCESS_DARK = "#388E3C"   # <--- FIXED: Added back
+CLR_SUCCESS_DARK = "#388E3C"   
 CLR_DANGER = "#D32F2F"   
 CLR_DANGER_HOVER = "#B71C1C"
 CLR_WARNING = "#FBC02D" 
 CLR_WARNING_HOVER = "#F57F17" 
-CLR_WARNING_DARK = "#F57F17"   # <--- FIXED: Added back
+CLR_WARNING_DARK = "#F57F17" 
 CLR_TEXT = "#212121"
 CLR_INFO_BOX = "#ECEFF1" 
 CLR_PROG_BG = "#E0E0E0" 
 CLR_SAND = "#FFD700"  
 CLR_GLASS = "#555555" 
 CLR_LIGHT_BLUE = "#E3F2FD" 
-
+CLR_TRAY = "#F7F9FB"         # Cloud White Background
+CLR_TRAY_TEXT = "#37474F"    # Dark Blue-Grey Text
+CLR_TILE_BG = "#FFFFFF"      # Pure White Cards
+CLR_TILE_BORDER = "#DAE0E5"  # Subtle Border color
+CLR_TILE_SHADOW = "#CFD8DC"  # Bottom border "Shadow"
+CLR_ACCENT_BG = "#E3F2FD"  # <--- THIS WAS MISSING (Light Blue for Active Tiles)
 # --- ROUNDED BUTTON ---
 class RoundedButton(tk.Canvas):
     def __init__(self, parent, text, command, width=120, height=50, radius=20, 
@@ -168,7 +186,7 @@ class ModernProgressBar(tk.Canvas):
         if new_width > 0: self.create_rounded_rect(0, 0, new_width, self.h, radius=self.h, fill=self.fill_color, tags="fill")
         if self.current_pct != self.target_pct: self.after(20, self.animate)
             
-# --- UPDATED SCROLLABLE FRAME (Scroll vs Click Logic) ---
+# --- SCROLLABLE FRAME ---
 class ScrollableFrame(tk.Frame):
     def __init__(self, container, *args, **kwargs):
         super().__init__(container, *args, **kwargs)
@@ -182,88 +200,1293 @@ class ScrollableFrame(tk.Frame):
         self.canvas.pack(side="left", fill="both", expand=True)
         
         self.last_y = 0
-        self.scroll_start_y = 0  # <--- THIS LINE IS MISSING IN YOUR CODE
+        self.scroll_start_y = 0 
 
-    def _on_canvas_configure(self, event):
-        self.canvas.itemconfig(self.window_id, width=event.width)
-
-    def _start_scroll(self, event):
-        self.last_y = event.y_root
-        self.scroll_start_y = event.y_root  # <--- THIS MUST BE HERE TOO
-
+    def _on_canvas_configure(self, event): self.canvas.itemconfig(self.window_id, width=event.width)
+    def _start_scroll(self, event): self.last_y = event.y_root; self.scroll_start_y = event.y_root
     def _do_scroll(self, event):
-        dy = event.y_root - self.last_y
-        self.last_y = event.y_root
-        
+        dy = event.y_root - self.last_y; self.last_y = event.y_root
         bbox = self.canvas.bbox("all")
         if not bbox: return
-        
-        content_height = bbox[3]
-        view_height = self.canvas.winfo_height()
+        content_height = bbox[3]; view_height = self.canvas.winfo_height()
         if content_height <= view_height: return
-
-        fraction = -dy / float(content_height)
-        current_top, _ = self.canvas.yview()
-        new_top = current_top + fraction
-        
+        fraction = -dy / float(content_height) 
+        current_top, _ = self.canvas.yview(); new_top = current_top + fraction
         if new_top < 0: new_top = 0
         max_scroll = 1.0 - (view_height / content_height)
         if new_top > max_scroll: new_top = max_scroll
-            
-        self.canvas.yview_moveto(new_top)# --- FIND THIS FUNCTION AND UPDATE IT ---
-        
+        self.canvas.yview_moveto(new_top)
+
+# --- BACKGROUND GENERATOR (FIXED) ---
 def get_blur_bg(root_window):
     if not HAS_PIL: return None
     try:
-        # CRITICAL FIX: Use update() instead of update_idletasks()
-        # This forces the GPU to finish painting the new screen before we grab it.
         root_window.update() 
-        
-        x = root_window.winfo_rootx()
-        y = root_window.winfo_rooty()
-        w = root_window.winfo_width()
-        h = root_window.winfo_height()
-        
+        x = root_window.winfo_rootx(); y = root_window.winfo_rooty()
+        w = root_window.winfo_width(); h = root_window.winfo_height()
         if w <= 1 or h <= 1: return None
-        
         img = ImageGrab.grab(bbox=(x, y, x+w, y+h))
         white_layer = Image.new("RGB", img.size, (255, 255, 255))
         blended = Image.blend(img, white_layer, 0.85)
+        # Apply Gaussian Blur for that "frosted glass" effect
+        #blended = blended.filter(ImageFilter.GaussianBlur(radius=5)) 
         return ImageTk.PhotoImage(blended)
     except Exception as e:
-        print(f"BG Blur Error: {e}")
-        return None
-    
-    
+        print(f"BG Blur Error: {e}"); return None
+
 # --- BASE MODAL ---
 class ModalOverlay(tk.Toplevel):
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
         self.withdraw()
-        
-        root = parent.winfo_toplevel()
-        # Force update before measuring
-        root.update_idletasks()
-        
-        x = root.winfo_rootx(); y = root.winfo_rooty()
-        w = root.winfo_width(); h = root.winfo_height()
-        
-        self.geometry(f"{w}x{h}+{x}+{y}")
-        self.overrideredirect(True)
-        self.config(cursor="none")
-        
+        root = parent.winfo_toplevel(); root.update_idletasks()
+        x = root.winfo_rootx(); y = root.winfo_rooty(); w = root.winfo_width(); h = root.winfo_height()
+        self.geometry(f"{w}x{h}+{x}+{y}"); self.overrideredirect(True); self.config(cursor="none")
         self.bg_img = get_blur_bg(root)
-        
         self.cv = tk.Canvas(self, width=w, height=h, highlightthickness=0, bg="white")
         self.cv.pack(fill="both", expand=True)
-        
-        if self.bg_img: 
-            self.cv.create_image(0, 0, image=self.bg_img, anchor="nw")
-        else: 
-            # Fallback color if capture fails
-            self.cv.configure(bg="#FAFAFA")
-            
+        if self.bg_img: self.cv.create_image(0, 0, image=self.bg_img, anchor="nw")
+        else: self.cv.configure(bg="#FAFAFA")
         self.bind("<Button-1>", lambda e: self.config(cursor="none"))
+
+
+# --- CUSTOM BRIGHTNESS WIDGET ---
+# --- CUSTOM BRIGHTNESS WIDGET (Clean & Modern) ---
+class BrightnessControl(tk.Canvas):
+    def __init__(self, parent, width=180, height=280, initial=50, command=None, bg_color="#F7F9FC"):
+        super().__init__(parent, width=width, height=height, bg=bg_color, highlightthickness=0)
+        self.w = width; self.h = height
+        self.val = initial; self.command = command
+        
+        self.cx = width / 2
+        self.cy_sun = 45        
+        self.bar_w = 90          
+        self.bar_x = (width - self.bar_w) / 2
+        self.bar_top = 90       
+        self.bar_bot = height - 20 
+        self.bar_h = self.bar_bot - self.bar_top
+        
+        self.bind("<Button-1>", self.on_touch)
+        self.bind("<B1-Motion>", self.on_touch)
+        self.draw()
+
+    def draw(self):
+        self.delete("all")
+        pct = self.val / 100.0
+        
+        # Modern Sun Colors
+        if pct < 0.3: sun_fill = "#B0BEC5"      # Inactive Grey
+        elif pct < 0.8: sun_fill = "#FFB300"    # Warm Orange
+        else: sun_fill = "#FF6F00"              # Hot Orange
+        
+        # Tiny Sun (Clean look)
+        core_r = 6 + (2 * pct)
+        ray_len = 5 + (3 * pct) 
+        
+        for i in range(0, 360, 45):
+            rad = math.radians(i + (pct * 90))
+            x1 = self.cx + ((core_r + 4) * math.cos(rad))
+            y1 = self.cy_sun + ((core_r + 4) * math.sin(rad))
+            x2 = self.cx + ((core_r + 4 + ray_len) * math.cos(rad))
+            y2 = self.cy_sun + ((core_r + 4 + ray_len) * math.sin(rad))
+            self.create_line(x1, y1, x2, y2, fill=sun_fill, width=2, capstyle="round")
+            
+        self.create_oval(self.cx-core_r, self.cy_sun-core_r, self.cx+core_r, self.cy_sun+core_r, fill=sun_fill, outline="")
+
+        # Bar Background (Subtle Track)
+        self.create_rectangle(self.bar_x, self.bar_top, self.bar_x + self.bar_w, self.bar_bot, 
+                              fill="#ECEFF1", outline="", width=0)
+        
+        # Active Fill (Gradient Simulation using solid colors)
+        fill_h = self.bar_h * pct
+        fill_top = self.bar_bot - fill_h
+        
+        # Color shifts from Blue -> Cyan based on height
+        fill_col = CLR_PRIMARY if pct <= 0.7 else "#00BCD4"
+        
+        self.create_rectangle(self.bar_x, fill_top, self.bar_x + self.bar_w, self.bar_bot, 
+                              fill=fill_col, outline="")
+        
+        # Text inside the bar
+        text_col = "white" if pct > 0.15 else "#90A4AE"
+        self.create_text(self.cx, self.bar_bot - 20, text=f"{int(self.val)}%", 
+                         font=("Arial", 14, "bold"), fill=text_col)
+
+    def update_from_y(self, y):
+        rel_y = max(self.bar_top, min(self.bar_bot, y))
+        travel = self.bar_bot - self.bar_top
+        current = self.bar_bot - rel_y
+        self.val = int((current / travel) * 100)
+        self.draw()
+        if self.command: self.command(self.val)
+
+    def on_touch(self, e): self.update_from_y(e.y)
+
+# --- CUSTOM SUN ICON (Colorful & Scalable) ---
+ #   --- DYNAMIC SUN ICON (Reflects Brightness) ---
+class SunIcon(tk.Canvas):
+    def __init__(self, parent, size=60, bg_color="#FFFFFF", brightness=100):
+        super().__init__(parent, width=size, height=size, bg=bg_color, highlightthickness=0)
+        self.size = size
+        self.brightness = brightness
+        self.draw()
+
+    def set_brightness(self, pct):
+        self.brightness = pct
+        self.draw()
+
+    def draw(self):
+        self.delete("all")
+        cx, cy = self.size/2, self.size/2
+        pct = self.brightness / 100.0
+        
+        # Color & Size Logic
+        if pct < 0.3:
+            # Low Brightness: Dim Grey/Blue
+            core_col = "#B0BEC5" 
+            outline_col = "#90A4AE"
+            ray_col = "#CFD8DC"
+            ray_len = 4
+            core_r = 10
+        elif pct < 0.7:
+            # Medium Brightness: Warm Yellow
+            core_col = "#FFEE58"
+            outline_col = "#FBC02D"
+            ray_col = "#FDD835"
+            ray_len = 6
+            core_r = 12
+        else:
+            # High Brightness: Hot Orange
+            core_col = "#FFEB3B"
+            outline_col = "#F57F17"
+            ray_col = "#FF9800"
+            ray_len = 9
+            core_r = 14
+            
+        # Draw Rays
+        gap = core_r + 4
+        
+        for i in range(0, 360, 45):
+            rad = math.radians(i + (pct * 45)) # Rotate slightly based on brightness
+            x1 = cx + (gap * math.cos(rad))
+            y1 = cy + (gap * math.sin(rad))
+            x2 = cx + ((gap + ray_len) * math.cos(rad))
+            y2 = cy + ((gap + ray_len) * math.sin(rad))
+            self.create_line(x1, y1, x2, y2, fill=ray_col, width=3, capstyle="round")
+
+        # Draw Core
+        self.create_oval(cx-core_r, cy-core_r, cx+core_r, cy+core_r, fill=core_col, outline=outline_col, width=2)            
+# --- CUSTOM BULB ICON (Modern) ---
+class BulbIcon(tk.Canvas):
+    def __init__(self, parent, size=60, bg_color="#FFFFFF"):
+        super().__init__(parent, width=size, height=size, bg=bg_color, highlightthickness=0)
+        self.size = size
+        self.is_on = False
+        self.draw()
+        
+    def set_state(self, is_on, new_bg):
+        self.is_on = is_on
+        self.config(bg=new_bg)
+        self.draw()
+
+    def draw(self):
+        self.delete("all")
+        cx, cy = self.size/2, self.size/2
+        
+        if self.is_on:
+            fill_col = "#FFC107" # Amber
+            outline_col = "#FFA000"
+            glow_ray = "#FFD54F"
+            # Draw Rays
+            for i in range(0, 360, 45):
+                rad = math.radians(i)
+                x1 = cx + (18 * math.cos(rad))
+                y1 = cy - 5 + (18 * math.sin(rad))
+                x2 = cx + (26 * math.cos(rad))
+                y2 = cy - 5 + (26 * math.sin(rad))
+                self.create_line(x1, y1, x2, y2, fill=glow_ray, width=2, capstyle="round")
+        else:
+            fill_col = "" 
+            outline_col = "#90A4AE" # Cool Grey
+            glow_ray = None
+
+        # Bulb Body
+        self.create_oval(cx-12, cy-22, cx+12, cy+2, outline=outline_col, fill=fill_col, width=2)
+        # Base
+        self.create_rectangle(cx-6, cy+2, cx+6, cy+14, fill="#CFD8DC", outline=outline_col, width=0)
+        # Threads
+        self.create_line(cx-5, cy+6, cx+5, cy+6, fill="#90A4AE", width=1)
+        self.create_line(cx-5, cy+10, cx+5, cy+10, fill="#90A4AE", width=1)
+        # Tip
+        self.create_oval(cx-2, cy+14, cx+2, cy+16, fill="#78909C", outline="")
+
+# --- CUSTOM WIFI ICON (Canvas Drawing - Guaranteed to Show) ---
+# --- CUSTOM WIFI ICON (Dynamic Color) ---
+class WiFiIcon(tk.Canvas):
+    def __init__(self, parent, size=60, bg_color="#FFFFFF", is_connected=False):
+        super().__init__(parent, width=size, height=size, bg=bg_color, highlightthickness=0)
+        self.is_connected = is_connected
+        self.draw()
+
+    def set_status(self, is_connected):
+        self.is_connected = is_connected
+        self.draw()
+
+    def draw(self):
+        self.delete("all")
+        cx, cy = 30, 45 
+        
+        # Color Logic
+        if self.is_connected:
+            col = CLR_PRIMARY  # Accent Blue
+            width_val = 5      # Thicker when connected
+        else:
+            col = "#546E7A"    # Dark Grey/Blackish
+            width_val = 4
+
+        # Small Dot
+        self.create_oval(cx-4, cy-4, cx+4, cy+4, fill=col, outline="")
+        
+        # Arcs
+        self.create_arc(cx-12, cy-12, cx+12, cy+12, start=45, extent=90, style="arc", outline=col, width=width_val)
+        self.create_arc(cx-20, cy-20, cx+20, cy+20, start=45, extent=90, style="arc", outline=col, width=width_val)
+        self.create_arc(cx-28, cy-28, cx+28, cy+28, start=45, extent=90, style="arc", outline=col, width=width_val)
+
+
+# --- CUSTOM KEYBOARD BUTTON (Responsive Canvas) ---
+# --- CUSTOM KEYBOARD BUTTON (Responsive Canvas) ---
+class KeyboardKey(tk.Canvas):
+    def __init__(self, parent, text, width, height, command=None, bg_color="#FFFFFF", fg_color="#000000", is_special=False):
+        super().__init__(parent, width=width, height=height, bg="#D1D5DB", highlightthickness=0)
+        self.command = command
+        self.text = text
+        self.w = width
+        self.h = height
+        self.base_bg = bg_color
+        self.base_fg = fg_color
+        self.is_special = is_special
+        
+        self.draw_button(self.base_bg, self.base_fg)
+        
+        self.bind("<Button-1>", self.on_press)
+        self.bind("<ButtonRelease-1>", self.on_release)
+
+    def draw_button(self, fill_col, text_col):
+        self.delete("all")
+        m = 2 
+        r = 10 
+        
+        # Draw Rounded Rect
+        self.create_arc(m, m, m+2*r, m+2*r, start=90, extent=90, fill=fill_col, outline="")
+        self.create_arc(self.w-m-2*r, m, self.w-m, m+2*r, start=0, extent=90, fill=fill_col, outline="")
+        self.create_arc(self.w-m-2*r, self.h-m-2*r, self.w-m, self.h-m, start=270, extent=90, fill=fill_col, outline="")
+        self.create_arc(m, self.h-m-2*r, m+2*r, self.h-m, start=180, extent=90, fill=fill_col, outline="")
+        self.create_rectangle(m+r, m, self.w-m-r, self.h-m, fill=fill_col, outline="")
+        self.create_rectangle(m, m+r, self.w-m, self.h-m-r, fill=fill_col, outline="")
+        
+        f_size = 14 if len(self.text) > 1 else 18
+        if self.is_special: f_size = 12
+        self.create_text(self.w/2, self.h/2, text=self.text, font=("Arial", f_size, "bold"), fill=text_col)
+
+    def on_press(self, e):
+        press_col = "#E0E0E0" if self.base_bg == "#FFFFFF" else "#90A4AE"
+        self.draw_button(press_col, self.base_fg)
+        if self.command: self.command()
+
+    def on_release(self, e):
+        self.draw_button(self.base_bg, self.base_fg)
+    
+    def update_text(self, new_text):
+        self.text = new_text
+        self.draw_button(self.base_bg, self.base_fg)
+    
+    def set_color(self, new_bg, new_fg):
+        self.base_bg = new_bg
+        self.base_fg = new_fg
+        self.draw_button(new_bg, new_fg)
+
+
+# --- FULL WIDTH RESPONSIVE KEYBOARD ---
+# --- CUSTOM KEYBOARD BUTTON (Unchanged) ---
+class KeyboardKey(tk.Canvas):
+    def __init__(self, parent, text, width, height, command=None, bg_color="#FFFFFF", fg_color="#000000", is_special=False):
+        super().__init__(parent, width=width, height=height, bg="#D1D5DB", highlightthickness=0)
+        self.command = command
+        self.text = text
+        self.w = width
+        self.h = height
+        self.base_bg = bg_color
+        self.base_fg = fg_color
+        self.is_special = is_special
+        
+        self.draw_button(self.base_bg, self.base_fg)
+        
+        self.bind("<Button-1>", self.on_press)
+        self.bind("<ButtonRelease-1>", self.on_release)
+
+    def draw_button(self, fill_col, text_col):
+        self.delete("all")
+        m = 2; r = 10
+        
+        # Rounded Rect
+        self.create_arc(m, m, m+2*r, m+2*r, start=90, extent=90, fill=fill_col, outline="")
+        self.create_arc(self.w-m-2*r, m, self.w-m, m+2*r, start=0, extent=90, fill=fill_col, outline="")
+        self.create_arc(self.w-m-2*r, self.h-m-2*r, self.w-m, self.h-m, start=270, extent=90, fill=fill_col, outline="")
+        self.create_arc(m, self.h-m-2*r, m+2*r, self.h-m, start=180, extent=90, fill=fill_col, outline="")
+        self.create_rectangle(m+r, m, self.w-m-r, self.h-m, fill=fill_col, outline="")
+        self.create_rectangle(m, m+r, self.w-m, self.h-m-r, fill=fill_col, outline="")
+        
+        f_size = 14 if len(self.text) > 1 else 18
+        if self.is_special: f_size = 12
+        self.create_text(self.w/2, self.h/2, text=self.text, font=("Arial", f_size, "bold"), fill=text_col)
+
+    def on_press(self, e):
+        press_col = "#E0E0E0" if self.base_bg == "#FFFFFF" else "#90A4AE"
+        self.draw_button(press_col, self.base_fg)
+        if self.command: self.command()
+
+    def on_release(self, e):
+        self.draw_button(self.base_bg, self.base_fg)
+    
+    def update_text(self, new_text):
+        self.text = new_text
+        self.draw_button(self.base_bg, self.base_fg)
+    
+    def set_color(self, new_bg, new_fg):
+        self.base_bg = new_bg
+        self.base_fg = new_fg
+        self.draw_button(new_bg, new_fg)
+
+
+# --- FULL WIDTH RESPONSIVE KEYBOARD (Fixed Layout & Animations) ---
+class TouchKeyboard(tk.Toplevel):
+    def __init__(self, parent, target_entry, on_close=None):
+        super().__init__(parent)
+        self.target = target_entry
+        self.on_close = on_close
+        
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.config(bg="#D1D5DB", cursor="none")
+        
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        self.kb_h = 280 
+        self.geometry(f"{screen_w}x{self.kb_h}+0+{screen_h - self.kb_h}")
+        
+        # Dynamic Widths
+        self.base_key_w = int(screen_w / 10) - 4
+        self.base_key_h = 55 
+        
+        self.container = tk.Frame(self, bg="#D1D5DB", padx=2, pady=5)
+        self.container.pack(fill="both", expand=True)
+        
+        self.is_shift = False
+        self.is_symbols = False
+        self.letter_keys = [] 
+        
+        self.render_layout()
+        self.popover = None
+
+    def show_popover(self, key_widget, text):
+        if len(text) > 1: return # Only for single chars
+        
+        x = key_widget.winfo_rootx()
+        y = key_widget.winfo_rooty()
+        w = key_widget.winfo_width()
+        
+        if self.popover: self.popover.destroy()
+        
+        self.popover = tk.Toplevel(self)
+        self.popover.overrideredirect(True)
+        self.popover.attributes("-topmost", True)
+        
+        pop_w, pop_h = 60, 70
+        pos_x = x + (w//2) - (pop_w//2)
+        pos_y = y - pop_h + 10
+        
+        self.popover.geometry(f"{pop_w}x{pop_h}+{pos_x}+{pos_y}")
+        
+        cv = tk.Canvas(self.popover, width=pop_w, height=pop_h, bg="white", highlightthickness=0)
+        cv.pack()
+        cv.create_rectangle(2, 2, pop_w-2, pop_h-2, outline="#B0BEC5", width=1)
+        cv.create_text(pop_w/2, pop_h/2 - 5, text=text, font=("Arial", 28, "bold"), fill="black")
+        
+        self.after(150, lambda: self.popover.destroy())
+
+    def render_layout(self):
+        for w in self.container.winfo_children(): w.destroy()
+        self.letter_keys = []
+        
+        if self.is_symbols:
+            rows = [
+                ['1','2','3','4','5','6','7','8','9','0'],
+                ['@','#','$','_','&','-','+','(',')','/'],
+                ['*','"',"'",':',';','!','?',',','.']
+            ]
+        else:
+            rows = [
+                ['q','w','e','r','t','y','u','i','o','p'],
+                ['a','s','d','f','g','h','j','k','l'],
+                ['z','x','c','v','b','n','m']
+            ]
+
+        # --- ROWS 1 & 2 ---
+        for row_keys in rows[:2]:
+            row_f = tk.Frame(self.container, bg="#D1D5DB")
+            row_f.pack(expand=True, fill="both", pady=2)
+            for k in row_keys:
+                txt = k.upper() if (self.is_shift and not self.is_symbols) else k
+                btn = KeyboardKey(row_f, text=txt, width=self.base_key_w, height=self.base_key_h, bg_color="#FFFFFF")
+                # FIX 1: Ensure Symbols also get the popover animation
+                btn.command = lambda b=btn, char=txt: (self.press(char), self.show_popover(b, char))
+                btn.pack(side="left", padx=2, expand=True)
+                
+                if not self.is_symbols: self.letter_keys.append(btn)
+
+        # --- ROW 3 ---
+        row3_f = tk.Frame(self.container, bg="#D1D5DB")
+        row3_f.pack(expand=True, fill="both", pady=2)
+        
+        special_w = int(self.base_key_w * 1.5)
+        
+        if self.is_symbols:
+             # FIX 2: Layout overflow fix for Symbols
+             # Symbols Row 3 has 9 keys. Adding a Wide Backspace (1.5x) makes 10.5x width -> Overflow.
+             # Solution: Use Standard Width (base_key_w) for Backspace in Symbol mode.
+             
+             for k in rows[2]:
+                btn = KeyboardKey(row3_f, text=k, width=self.base_key_w, height=self.base_key_h, bg_color="#FFFFFF")
+                # FIX 1: Animation for symbols row 3
+                btn.command = lambda b=btn, c=k: (self.press(c), self.show_popover(b, c))
+                btn.pack(side="left", padx=2, expand=True)
+             
+             # Standard Width Backspace for Symbols
+             btn_bs = KeyboardKey(row3_f, text="⌫", width=self.base_key_w, height=self.base_key_h, bg_color="#B0BEC5", is_special=True)
+             btn_bs.command = self.backspace
+             btn_bs.pack(side="left", padx=2, expand=True)
+
+        else:
+            # Alpha Layout (Fits perfectly with 1.5x Shift/Backspace)
+            bg_shift = "#FFFFFF" if self.is_shift else "#B0BEC5"
+            fg_shift = CLR_PRIMARY if self.is_shift else "#000000"
+            
+            self.btn_shift = KeyboardKey(row3_f, text="⇧", width=special_w, height=self.base_key_h, bg_color=bg_shift, fg_color=fg_shift, is_special=True)
+            self.btn_shift.command = self.toggle_shift
+            self.btn_shift.pack(side="left", padx=2)
+            
+            for k in rows[2]:
+                txt = k.upper() if self.is_shift else k
+                btn = KeyboardKey(row3_f, text=txt, width=self.base_key_w, height=self.base_key_h)
+                btn.command = lambda b=btn, char=txt: (self.press(char), self.show_popover(b, char))
+                btn.pack(side="left", padx=2, expand=True)
+                self.letter_keys.append(btn)
+                
+            btn_bs = KeyboardKey(row3_f, text="⌫", width=special_w, height=self.base_key_h, bg_color="#B0BEC5", is_special=True)
+            btn_bs.command = self.backspace
+            btn_bs.pack(side="left", padx=2)
+
+        # --- ROW 4 ---
+        row4_f = tk.Frame(self.container, bg="#D1D5DB")
+        row4_f.pack(expand=True, fill="both", pady=2)
+        
+        side_btn_w = int(self.base_key_w * 2) 
+        space_w = int(self.base_key_w * 5)
+        
+        lbl_sym = "ABC" if self.is_symbols else "123"
+        btn_sym = KeyboardKey(row4_f, text=lbl_sym, width=side_btn_w, height=self.base_key_h, bg_color="#B0BEC5", is_special=True)
+        btn_sym.command = self.toggle_symbols
+        btn_sym.pack(side="left", padx=2, expand=True)
+        
+        btn_spc = KeyboardKey(row4_f, text="space", width=space_w, height=self.base_key_h, bg_color="#FFFFFF")
+        btn_spc.command = lambda: self.press(" ")
+        btn_spc.pack(side="left", padx=2, expand=True)
+        
+        btn_done = KeyboardKey(row4_f, text="Done", width=side_btn_w, height=self.base_key_h, bg_color=CLR_PRIMARY, fg_color="#FFFFFF", is_special=True)
+        btn_done.command = self.close_kb
+        btn_done.pack(side="left", padx=2, expand=True)
+
+    def press(self, char):
+        self.target.insert(tk.END, char)
+
+    def backspace(self):
+        txt = self.target.get()
+        self.target.delete(0, tk.END)
+        self.target.insert(0, txt[:-1])
+
+    def toggle_shift(self):
+        self.is_shift = not self.is_shift
+        new_fg = CLR_PRIMARY if self.is_shift else "#000000"
+        new_bg = "#FFFFFF" if self.is_shift else "#B0BEC5"
+        self.btn_shift.set_color(new_bg, new_fg)
+        
+        for btn in self.letter_keys:
+            old_txt = btn.text
+            new_txt = old_txt.upper() if self.is_shift else old_txt.lower()
+            btn.update_text(new_txt)
+            btn.command = lambda b=btn, char=new_txt: (self.press(char), self.show_popover(b, char))
+
+    def toggle_symbols(self):
+        self.is_symbols = not self.is_symbols
+        self.render_layout()
+
+    def close_kb(self):
+        if self.on_close: self.on_close()
+        self.destroy()
+
+
+# --- WIFI POPUP (Same as before) ---
+class WifiPasswordPopup(tk.Toplevel):
+    def __init__(self, parent, ssid, on_connect):
+        super().__init__(parent)
+        self.ssid = ssid
+        self.on_connect = on_connect
+        self.kb_win = None
+        self.is_visible = False
+        
+        self.overrideredirect(True)
+        self.config(bg="white", cursor="none")
+        self.bind("<Button-1>", lambda e: self.config(cursor="none"))
+        self.attributes("-topmost", True)
+        
+        w, h = 380, 190 
+        x = parent.winfo_rootx() + (parent.winfo_width()//2) - (w//2)
+        y = 10 
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        
+        main_f = tk.Frame(self, bg="white", highlightthickness=2, highlightbackground=CLR_PRIMARY)
+        main_f.pack(fill="both", expand=True)
+        
+        tk.Label(main_f, text=f"Join Network", font=("Arial", 10, "bold"), bg="white", fg="#90A4AE").pack(pady=(15, 0))
+        tk.Label(main_f, text=ssid, font=("Arial", 14, "bold"), bg="white", fg="#37474F").pack(pady=(0, 10))
+        
+        input_container = tk.Frame(main_f, bg="white", bd=0)
+        input_container.pack(pady=5, padx=30, fill="x")
+        
+        underline = tk.Frame(input_container, bg=CLR_PRIMARY, height=2)
+        underline.pack(side="bottom", fill="x")
+        
+        entry_area = tk.Frame(input_container, bg="white")
+        entry_area.pack(side="top", fill="x")
+        
+        self.entry = tk.Entry(entry_area, font=("Arial", 14), show="•", bg="white", bd=0, 
+                              highlightthickness=0, insertbackground=CLR_PRIMARY)
+        self.entry.pack(side="left", fill="x", expand=True, ipady=5)
+        self.entry.bind("<Button-1>", self.open_keyboard)
+        self.entry.focus_force()
+        
+        self.eye_btn = tk.Label(entry_area, text="👁", font=("Arial", 16), bg="white", fg="#90A4AE")
+        self.eye_btn.pack(side="right", padx=(5,0))
+        self.eye_btn.bind("<Button-1>", self.toggle_visibility)
+        
+        btn_frame = tk.Frame(main_f, bg="white")
+        btn_frame.pack(pady=(15, 5), fill="x", padx=30)
+        
+        tk.Button(btn_frame, text="Cancel", command=self.cancel, bg="#ECEFF1", bd=0, padx=15, pady=8, font=("Arial", 11)).pack(side="left")
+        tk.Button(btn_frame, text="Connect", command=self.submit, bg=CLR_PRIMARY, fg="white", bd=0, padx=15, pady=8, font=("Arial", 11, "bold")).pack(side="right")
+        
+        self.open_keyboard(None)
+
+    def toggle_visibility(self, event):
+        self.is_visible = not self.is_visible
+        if self.is_visible:
+            self.entry.config(show="")
+            self.eye_btn.config(text="🔒", fg=CLR_PRIMARY)
+        else:
+            self.entry.config(show="•")
+            self.eye_btn.config(text="👁", fg="#90A4AE")
+
+    def open_keyboard(self, event):
+        if not self.kb_win or not self.kb_win.winfo_exists():
+            self.kb_win = TouchKeyboard(self, self.entry)
+
+    def cancel(self):
+        if self.kb_win: self.kb_win.destroy()
+        self.destroy()
+
+    def submit(self):
+        pwd = self.entry.get()
+        if self.kb_win: self.kb_win.destroy()
+        self.destroy()
+        self.on_connect(self.ssid, pwd)
+
+
+# --- CUSTOM ROUNDED TILE (Replaces Square Frames) ---
+# --- CUSTOM ROUNDED TILE (No Cursor) ---
+ # --- CUSTOM ROUNDED TILE (Robust Clicking) ---
+class RoundedTile(tk.Canvas):
+    def __init__(self, parent, width=125, height=110, bg_color="#FFFFFF", border_color="#E0E0E0", command=None):
+        super().__init__(parent, width=width, height=height, bg=CLR_TRAY, highlightthickness=0, cursor="none")
+        self.w = width
+        self.h = height
+        self.base_bg = bg_color
+        self.border_col = border_color
+        self.command = command
+        
+        self.icon_widget = None 
+        self.is_pressed = False
+        
+        self.draw(self.base_bg, self.border_col)
+        
+        # 1. Bind Background
+        self.bind("<Button-1>", self.on_press)
+        self.bind("<ButtonRelease-1>", self.on_release)
+        
+        # 2. CRITICAL FIX: Bind Content (Text/Shapes) directly
+        # This ensures clicking the text label doesn't ignore the command
+        self.tag_bind("content", "<Button-1>", self.on_press)
+        self.tag_bind("content", "<ButtonRelease-1>", self.on_release)
+
+    def set_icon_widget(self, widget):
+        self.icon_widget = widget
+        widget.config(cursor="none")
+        # Pass widget clicks to tile logic
+        widget.bind("<Button-1>", self.on_press)
+        widget.bind("<ButtonRelease-1>", self.on_release)
+
+    def round_rect(self, x1, y1, x2, y2, radius=25, **kwargs):
+        points = [x1+radius, y1, x1+radius, y1, x2-radius, y1, x2-radius, y1, x2, y1, x2, y1+radius, x2, y1+radius, x2, y2-radius, x2, y2-radius, x2, y2, x2-radius, y2, x2-radius, y2, x1+radius, y2, x1+radius, y2, x1, y2, x1, y2-radius, x1, y2-radius, x1, y1+radius, x1, y1+radius, x1, y1]
+        return self.create_polygon(points, **kwargs, smooth=True)
+
+    def draw(self, fill_col, border_col):
+        self.delete("bg_shape")
+        r = 15; bw = 2; inset = bw / 2
+        self.round_rect(inset, inset, self.w-inset, self.h-inset, radius=r, 
+                        fill=fill_col, outline=border_col, width=bw, tags="bg_shape")
+        self.tag_lower("bg_shape")
+
+    def update_colors(self, new_bg, new_border):
+        self.base_bg = new_bg
+        self.border_col = new_border
+        self.draw(new_bg, new_border)
+        
+        if self.icon_widget:
+            self.icon_widget.config(bg=new_bg)
+            if hasattr(self.icon_widget, 'bg_color'):
+                self.icon_widget.bg_color = new_bg
+                if hasattr(self.icon_widget, 'draw'): self.icon_widget.draw()
+
+    def on_press(self, e):
+        self.is_pressed = True
+        self.draw(CLR_ACCENT_BG, CLR_PRIMARY)
+        if self.icon_widget: 
+            self.icon_widget.config(bg=CLR_ACCENT_BG)
+            if hasattr(self.icon_widget, 'draw'): self.icon_widget.draw()
+        
+    def on_release(self, e):
+        self.after(100, lambda: self.restore_visuals())
+        if self.is_pressed and self.command:
+            self.command(None)
+        self.is_pressed = False
+
+    def restore_visuals(self):
+        self.draw(self.base_bg, self.border_col)
+        if self.icon_widget:
+            self.icon_widget.config(bg=self.base_bg)
+            if hasattr(self.icon_widget, 'draw'): self.icon_widget.draw()
+# --- MODERN BRIGHTNESS SLIDER (No Cursor, Clean Fill) ---
+class ModernBrightness(tk.Canvas):
+    def __init__(self, parent, width=140, height=300, initial=50, command=None, bg_color="#F7F9FC"):
+        super().__init__(parent, width=width, height=height, bg=bg_color, highlightthickness=0, cursor="none")
+        self.w = width
+        self.h = height
+        self.val = initial
+        self.command = command
+        
+        self.pad = 20
+        self.bar_w = 100
+        self.bar_x = (width - self.bar_w) / 2
+        self.bar_h = height - (self.pad * 2)
+        self.bar_top = self.pad
+        self.bar_bot = height - self.pad
+        
+        self.bind("<Button-1>", self.on_touch)
+        self.bind("<B1-Motion>", self.on_touch)
+        self.draw()
+
+    def create_rounded_rect(self, x1, y1, x2, y2, r, fill, outline, width=1):
+        points = [x1+r, y1, x1+r, y1, x2-r, y1, x2-r, y1, x2, y1, x2, y1+r, x2, y1+r, x2, y2-r, x2, y2-r, x2, y2, x2-r, y2, x2-r, y2, x1+r, y2, x1+r, y2, x1, y2, x1, y2-r, x1, y2-r, x1, y1+r, x1, y1+r, x1, y1]
+        return self.create_polygon(points, smooth=True, fill=fill, outline=outline, width=width)
+
+    def draw_sun_icon(self, cx, cy, pct):
+        if pct < 0.3:
+            core_col, ray_col = "#B0BEC5", "#CFD8DC"
+            ray_len, core_r = 4, 10
+        elif pct < 0.7:
+            core_col, ray_col = "#FFEE58", "#FDD835"
+            ray_len, core_r = 6, 12
+        else:
+            core_col, ray_col = "#FFEB3B", "#FF9800"
+            ray_len, core_r = 9, 14
+            
+        gap = core_r + 4
+        for i in range(0, 360, 45):
+            rad = math.radians(i + (pct * 45))
+            x1 = cx + (gap * math.cos(rad))
+            y1 = cy + (gap * math.sin(rad))
+            x2 = cx + ((gap + ray_len) * math.cos(rad))
+            y2 = cy + ((gap + ray_len) * math.sin(rad))
+            self.create_line(x1, y1, x2, y2, fill=ray_col, width=3, capstyle="round")
+        self.create_oval(cx-core_r, cy-core_r, cx+core_r, cy+core_r, fill=core_col, outline="", width=0)
+
+    def draw(self):
+        self.delete("all")
+        pct = self.val / 100.0
+        r = 25
+        
+        # Color Scheme
+        if pct < 0.3: outline_col = "#90A4AE"
+        elif pct < 0.7: outline_col = "#FBC02D"
+        else: outline_col = "#FF9800"
+
+        # 1. Track Background (Has Color Outline)
+        self.create_rounded_rect(self.bar_x, self.bar_top, self.bar_x+self.bar_w, self.bar_bot, 
+                                 r, "#CFD8DC", outline_col, width=2)
+        
+        # 2. Active Fill (Pure White, NO Outline)
+        fill_h = self.bar_h * pct
+        fill_top = self.bar_bot - fill_h
+        if fill_top < self.bar_top: fill_top = self.bar_top
+        
+        if pct > 0.05:
+            self.create_rounded_rect(self.bar_x, fill_top, self.bar_x+self.bar_w, self.bar_bot, 
+                                     r, "#FFFFFF", "", width=0) # <-- outline="" removes border
+
+        # 3. Sun Icon
+        cx = self.w / 2
+        cy = self.bar_bot - 40
+        self.draw_sun_icon(cx, cy, pct)
+        
+        # 4. Text
+        self.create_text(cx, self.bar_bot - 90, text=f"{int(self.val)}%", font=("Arial", 20, "bold"), fill="#37474F")
+
+    def update_from_y(self, y):
+        rel_y = max(self.bar_top, min(self.bar_bot, y))
+        travel = self.bar_bot - self.bar_top
+        dist_from_bot = self.bar_bot - rel_y
+        self.val = int((dist_from_bot / travel) * 100)
+        self.draw()
+        if self.command: self.command(self.val)
+    
+    def on_touch(self, e): self.update_from_y(e.y)
+# --- UPDATED SETTINGS TRAY ---
+# --- SETTINGS TRAY (Updated Focus & v1.3) ---
+# --- ROBUST MARQUEE (Crash-Proof) ---
+class MarqueeLabel(tk.Canvas):
+    def __init__(self, parent, text, width, height, font=("Arial", 14, "bold"), fg="#37474F", bg="white"):
+        super().__init__(parent, width=width, height=height, bg=bg, highlightthickness=0)
+        self.text = text
+        self.fps = 30
+        self.step = 1
+        self.margin = 30
+        self.animating = False
+        
+        # Create Text
+        self.text_id = self.create_text(0, height/2, text=text, font=font, fill=fg, anchor="w")
+        
+        self.canvas_width = width
+        self.text_width = 0
+        self.offset = 0
+        
+        # Bind resize event safely
+        self.bind("<Configure>", self.on_resize)
+        # Stop animation on destroy
+        self.bind("<Destroy>", self.on_destroy)
+
+    def on_destroy(self, event):
+        self.animating = False
+
+    def on_resize(self, event):
+        if not self.winfo_exists(): return
+        self.canvas_width = event.width
+        bbox = self.bbox(self.text_id)
+        if bbox:
+            self.text_width = bbox[2] - bbox[0]
+            if self.text_width > self.canvas_width and not self.animating:
+                self.animating = True
+                self.animate()
+
+    def animate(self):
+        # 1. CRITICAL SAFETY CHECK: Stop if widget is deleted
+        if not self.winfo_exists() or not self.animating: 
+            return
+
+        try:
+            self.offset -= self.step
+            
+            # Reset Logic
+            if abs(self.offset) > (self.text_width - self.canvas_width + self.margin):
+                self.after(1500, self.reset)
+                return
+
+            # Move Text
+            self.coords(self.text_id, self.offset, int(self["height"])/2)
+            
+            # Loop
+            self.after(self.fps, self.animate)
+            
+        except (tk.TclError, Exception):
+            # If any error happens (e.g. window closed mid-animation), stop loop
+            self.animating = False
+
+    def reset(self):
+        if not self.winfo_exists() or not self.animating: return
+        try:
+            self.offset = 0
+            self.coords(self.text_id, 0, int(self["height"])/2)
+            self.after(1000, self.animate)
+        except:
+            self.animating = False
+
+
+# --- REUSABLE SMOOTH SCROLL CLASS ---
+class SmoothScroll(tk.Canvas):
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.bind("<Button-1>", self.on_start)
+        self.bind("<B1-Motion>", self.on_drag)
+        self.bind("<ButtonRelease-1>", self.on_release)
+        
+        self.start_y = 0
+        self.scrolling = False
+        
+        # Tuning
+        self.damping = 2.0    
+        self.threshold = 8    
+
+    def on_start(self, event):
+        self.start_y = event.y
+        self.scrolling = False
+        self.scan_mark(event.x, event.y)
+
+    def on_drag(self, event):
+        # 1. CONTENT SIZE CHECK
+        # Get the total area of the content
+        bbox = self.bbox("all")
+        if not bbox: return # Empty list
+        
+        content_height = bbox[3] - bbox[1]
+        visible_height = self.winfo_height()
+
+        # CRITICAL FIX: If content fits on screen, STOP dragging
+        if content_height <= visible_height:
+            return
+
+        # 2. Threshold Check (Noise Filter)
+        delta = abs(event.y - self.start_y)
+        if not self.scrolling and delta < self.threshold:
+            return
+            
+        self.scrolling = True
+        
+        # 3. Apply Scroll
+        self.scan_dragto(event.x, event.y, gain=1)
+        
+        # 4. RUBBER BANDING / LIMITS (Optional but recommended)
+        # This prevents dragging too far into empty space even if list is long.
+        # Tkinter's scan_dragto is unbounded, but the "content size check" above
+        # solves 90% of the "single item flying away" issues.
+
+    def on_release(self, event):
+        self.scrolling = False
+
+class SettingsTray(tk.Frame):
+    def __init__(self, parent_root, controller, floating_btn):
+        super().__init__(parent_root)
+        self.c = controller
+        self.floating_btn = floating_btn
+        self.floating_btn.withdraw()
+        
+        # CRITICAL FIX: Force focus so first click always works
+        self.focus_force()
+        
+        self.bg_img = get_blur_bg(parent_root)
+        self.place(x=0, y=0, relwidth=1, relheight=1)
+        
+        w = parent_root.winfo_width()
+        h = parent_root.winfo_height()
+        
+        self.cv = tk.Canvas(self, width=w, height=h, highlightthickness=0, bg="white", cursor="none")
+        self.cv.pack(fill="both", expand=True)
+
+        if self.bg_img: self.cv.create_image(0, 0, image=self.bg_img, anchor="nw")
+        else: self.cv.configure(bg="#F7F9FC")
+            
+        self.tray_w = 320
+        self.tray_h = h
+        self.f = tk.Frame(self.cv, bg=CLR_TRAY, width=self.tray_w, height=self.tray_h, cursor="none")
+        self.f.pack_propagate(False)
+        self.tray_win = self.cv.create_window(w, 0, window=self.f, anchor="nw")
+        
+        # Header
+        h_frame = tk.Frame(self.f, bg=CLR_TRAY, height=80)
+        h_frame.pack(fill="x", side="top", pady=(20,0))
+        tk.Label(h_frame, text="Control Center", font=("Arial", 16, "bold"), fg=CLR_TRAY_TEXT, bg=CLR_TRAY).pack(side="left", padx=25)
+        
+        close_btn = tk.Label(h_frame, text="✕", font=("Arial", 22), fg="#90A4AE", bg=CLR_TRAY)
+        close_btn.pack(side="right", padx=25)
+        close_btn.bind("<Button-1>", lambda e: self.close())
+
+        self.content = tk.Frame(self.f, bg=CLR_TRAY, cursor="none")
+        self.content.pack(fill="both", expand=True, padx=20, pady=10)
+        
+        self.bulb_widgets = None
+        if not hasattr(self.c, "light_on"): self.c.light_on = False
+
+        self.show_main_menu()
+        self.animate_open(w, 0)
+
+    # ... keep animate_open and close same ...
+    def animate_open(self, screen_w, step):
+        target_x = screen_w - self.tray_w
+        current_x = screen_w - (step * 50) 
+        if current_x > target_x:
+            self.cv.coords(self.tray_win, current_x, 0)
+            self.after(5, lambda: self.animate_open(screen_w, step + 1))
+        else:
+            self.cv.coords(self.tray_win, target_x, 0)
+
+    def close(self):
+        self.floating_btn.deiconify()
+        self.destroy()
+
+    def show_main_menu(self):
+        # 1. Gather Data
+        current_bright = 50
+        wifi_connected = False
+        if hasattr(self.c, 'backend'):
+             current_bright = self.c.backend.get_brightness()
+             ssid = self.c.backend.get_connected_ssid()
+             if ssid: wifi_connected = True
+        
+        for w in self.content.winfo_children(): w.destroy()
+        grid = tk.Frame(self.content, bg=CLR_TRAY, cursor="none")
+        grid.pack(anchor="center", pady=10)
+        
+        def get_sun_color(pct):
+            if pct < 30: return "#90A4AE"
+            elif pct < 70: return "#FBC02D"
+            else: return "#FF9800"
+        sun_col = get_sun_color(current_bright)
+
+        def mk_tile(parent, icon_char, text, col, row, cmd, custom_icon_cls=None, border_col="#E0E0E0", icon_col="#546E7A"):
+            
+            # Create Tile
+            tile = RoundedTile(parent, width=125, height=110, bg_color=CLR_TILE_BG, border_color=border_col, command=cmd)
+            tile.grid(row=row, column=col, padx=8, pady=8)
+            
+            # --- Icon ---
+            if custom_icon_cls:
+                if custom_icon_cls == SunIcon:
+                    icon_widget = custom_icon_cls(tile, size=60, bg_color=CLR_TILE_BG, brightness=current_bright)
+                elif custom_icon_cls == WiFiIcon:
+                    icon_widget = custom_icon_cls(tile, size=60, bg_color=CLR_TILE_BG, is_connected=wifi_connected)
+                else:
+                    icon_widget = custom_icon_cls(tile, size=60, bg_color=CLR_TILE_BG)
+                
+                # Center icon (tag="content" ensures it is bound)
+                tile.create_window(62, 45, window=icon_widget, tags="content")
+                tile.set_icon_widget(icon_widget)
+
+                if custom_icon_cls == BulbIcon:
+                    self.bulb_widgets = {"tile": tile, "icon": icon_widget, "text_id": None}
+            else:
+                # Text Icon (tag="content" allows click-through)
+                tile.create_text(62, 45, text=icon_char, font=("Arial", 32), fill=icon_col, tags="content")
+
+            # --- Text Label (tag="content" allows click-through) ---
+            t_id = tile.create_text(62, 90, text=text, font=("Arial", 10, "bold"), fill="#455A64", tags="content")
+            
+            if custom_icon_cls == BulbIcon: self.bulb_widgets["text_id"] = t_id
+
+        # --- LAYOUT ---
+        wifi_col = CLR_PRIMARY if wifi_connected else "#E0E0E0"
+        mk_tile(grid, None, "WiFi", 0, 0, lambda e: self.show_wifi(), custom_icon_cls=WiFiIcon, border_col=wifi_col)
+        mk_tile(grid, None, "Display", 1, 0, lambda e: self.show_brightness(), custom_icon_cls=SunIcon, border_col=sun_col)
+        
+        light_border = "#FFD54F" if self.c.light_on else "#E0E0E0"
+        mk_tile(grid, None, "Light", 0, 1, lambda e: self.toggle_light(), custom_icon_cls=BulbIcon, border_col=light_border)
+        mk_tile(grid, "🌡", "Sensors", 1, 1, lambda e: self.show_sensors(), border_col=CLR_SUCCESS, icon_col=CLR_SUCCESS)
+        
+        mk_tile(grid, "⏻", "Power", 0, 2, lambda e: self.show_power(), border_col=CLR_DANGER, icon_col=CLR_DANGER)
+        mk_tile(grid, "ℹ", "Info", 1, 2, lambda e: self.show_about(), border_col="#546E7A", icon_col="#546E7A")
+        
+        self.update_bulb_visuals()
+
+    def show_about(self):
+        # UPDATED TO V1.3
+        popup = CustomPopup(self.winfo_toplevel(), "About", "SYSTEM INFO", 
+                            "Liquid Handler v1.3\nRunning on Raspberry Pi 4", 
+                            CLR_PRIMARY, "ℹ")
+        self.wait_window(popup)
+
+    def update_bulb_visuals(self):
+        if not self.bulb_widgets: return
+        is_on = self.c.light_on
+        
+        bg_c = "#FFF9C4" if is_on else CLR_TILE_BG
+        fg_text = "#FBC02D" if is_on else "#455A64"
+        border_c = "#FBC02D" if is_on else "#E0E0E0"
+        
+        # Update Tile Colors
+        self.bulb_widgets["tile"].update_colors(bg_c, border_c)
+        
+        # Update Text Color (Canvas Text)
+        self.bulb_widgets["tile"].itemconfig(self.bulb_widgets["text_id"], fill=fg_text)
+        
+        # Update Icon
+        self.bulb_widgets["icon"].set_state(is_on, bg_c)
+
+    def toggle_light(self):
+        self.c.light_on = not self.c.light_on 
+        self.update_bulb_visuals()
+
+    def show_brightness(self):
+        self.clear_content("Display")
+        
+        center_f = tk.Frame(self.content, bg=CLR_TRAY)
+        center_f.pack(expand=True)
+        
+        # Header
+        tk.Label(center_f, text="Display Brightness", fg="#37474F", bg=CLR_TRAY, font=("Arial", 16, "bold")).pack(pady=(0, 25))
+        
+        current_val = self.c.backend.get_brightness()
+        def on_change(val): self.c.backend.set_brightness(val)
+        
+        # NEW Modern Widget
+        mb = ModernBrightness(center_f, width=140, height=320, initial=current_val, command=on_change, bg_color=CLR_TRAY)
+        mb.pack()
+
+    # ... (Keep show_wifi, show_power, show_sensors, show_about, etc. unchanged) ...
+    def show_wifi(self):
+        self.clear_content("WiFi Networks")
+        
+        # --- HEADER ---
+        ctrl_bar = tk.Frame(self.content, bg=CLR_TRAY)
+        ctrl_bar.pack(fill="x", padx=10, pady=(0, 10))
+        
+        # 1. Status Label (Restored)
+        self.lbl_status = tk.Label(ctrl_bar, text="Ready", font=("Arial", 11, "italic"), fg="#78909C", bg=CLR_TRAY)
+        self.lbl_status.pack(side="left")
+        
+        btn_rescan = tk.Button(ctrl_bar, text="↻ Rescan", font=("Arial", 11, "bold"), 
+                               bg="white", fg=CLR_PRIMARY, bd=0, padx=15, pady=8)
+        btn_rescan.pack(side="right")
+        
+        # --- CONTAINER ---
+        container = tk.Frame(self.content, bg=CLR_TRAY)
+        container.pack(fill="both", expand=True, pady=5)
+        
+        # Canvas
+        canvas = SmoothScroll(container, bg=CLR_TRAY, highlightthickness=0)
+        canvas.pack(side="left", fill="both", expand=True)
+        
+        # Scroll Indicator
+        scroll_bg = tk.Canvas(container, width=8, bg="#ECEFF1", highlightthickness=0)
+        scroll_bg.place(relx=1.0, rely=0, relheight=1.0, anchor="ne")
+        thumb = scroll_bg.create_oval(1, 0, 7, 30, fill="#90A4AE", outline="")
+        
+        self.wifi_list_frame = tk.Frame(canvas, bg=CLR_TRAY)
+        canvas_window = canvas.create_window((0, 0), window=self.wifi_list_frame, anchor="nw")
+        
+        # Logic
+        def update_scrollbar():
+            try:
+                first, last = canvas.yview()
+                h = scroll_bg.winfo_height()
+                thumb_h = max(30, h * (last - first))
+                thumb_y = h * first
+                scroll_bg.coords(thumb, 1, thumb_y, 7, thumb_y + thumb_h)
+            except: pass
+
+        def on_scroll_move(e): update_scrollbar()
+        canvas.bind("<B1-Motion>", on_scroll_move, add="+")
+
+        def on_config(e): canvas.itemconfig(canvas_window, width=e.width)
+        canvas.bind("<Configure>", on_config)
+        
+        def update_region(e=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            update_scrollbar()
+        self.wifi_list_frame.bind("<Configure>", update_region)
+        
+        # --- POPULATE ---
+        def populate_wifi(networks):
+            try:
+                if not self.wifi_list_frame.winfo_exists(): return
+            except: return
+            
+            for w in self.wifi_list_frame.winfo_children(): w.destroy()
+            
+            # Update Label
+            self.lbl_status.config(text=f"Found {len(networks)} networks")
+            
+            if not networks:
+                tk.Label(self.wifi_list_frame, text="No networks found", bg=CLR_TRAY, fg="#B0BEC5").pack(pady=20)
+                return
+
+            for net in networks:
+                ssid = net["ssid"]
+                signal = net["signal"]
+                is_connected = net.get("connected", False)
+                
+                r = tk.Frame(self.wifi_list_frame, bg="white", pady=12, padx=10, highlightbackground="#E0E0E0", highlightthickness=1)
+                r.pack(fill="x", pady=5, padx=5)
+                
+                # Bind Scroll
+                r.bind("<Button-1>", canvas.on_start)
+                r.bind("<B1-Motion>", canvas.on_drag)
+                r.bind("<ButtonRelease-1>", canvas.on_release)
+
+                # --- ICONS ---
+                if is_connected:
+                    # Connected Checkmark
+                    lbl = tk.Label(r, text="✓", font=("Arial", 24, "bold"), fg="#4CAF50", bg="white")
+                    lbl.pack(side="right", padx=10)
+                    r.config(highlightbackground="#4CAF50", highlightthickness=2)
+                    lbl.bind("<Button-1>", canvas.on_start); lbl.bind("<B1-Motion>", canvas.on_drag); lbl.bind("<ButtonRelease-1>", canvas.on_release)
+                else:
+                    # NEW: Sleek "Add/Link" Button (Blue Plus Circle)
+                    # We use a Label acting as a button for cleaner look
+                    btn = tk.Label(r, text="+", font=("Arial", 18, "bold"), fg=CLR_PRIMARY, bg="white", cursor="hand2")
+                    btn.pack(side="right", padx=15)
+                    
+                    # Bind Click (Connect) - Stops propagation so it doesn't trigger scroll
+                    btn.bind("<Button-1>", lambda e, s=ssid: WifiPasswordPopup(self.winfo_toplevel(), s, self.trigger_connect))
+                
+                # Signal Text
+                lbl_sig = tk.Label(r, text=f"{signal}%", font=("Arial", 11), fg="#90A4AE", bg="white")
+                lbl_sig.pack(side="right", padx=10)
+                lbl_sig.bind("<Button-1>", canvas.on_start); lbl_sig.bind("<B1-Motion>", canvas.on_drag); lbl_sig.bind("<ButtonRelease-1>", canvas.on_release)
+
+                # Marquee Name
+                mq = MarqueeLabel(r, text=ssid, width=150, height=35, bg="white")
+                mq.pack(side="left", padx=5)
+                mq.bind("<Button-1>", canvas.on_start)
+                mq.bind("<B1-Motion>", canvas.on_drag)
+                mq.bind("<ButtonRelease-1>", canvas.on_release)
+
+            self.wifi_list_frame.update_idletasks()
+            update_region()
+
+        def run_scan():
+            try:
+                if not self.winfo_exists(): return
+                self.lbl_status.config(text="Scanning...")
+                btn_rescan.config(state="disabled", bg="#ECEFF1", text="Scanning...")
+                for w in self.wifi_list_frame.winfo_children(): w.destroy()
+            except: return
+            nets = self.c.backend.get_wifi_networks()
+            def update_ui():
+                try:
+                    if not self.winfo_exists(): return
+                    populate_wifi(nets)
+                    btn_rescan.config(state="normal", bg="white", text="↻ Rescan")
+                except: return
+            self.after(0, update_ui)
+
+        btn_rescan.config(command=lambda: threading.Thread(target=run_scan, daemon=True).start())
+        threading.Thread(target=run_scan, daemon=True).start()
+        
+            
+    def show_power(self):
+        self.clear_content("Power Options")
+        bf = tk.Frame(self.content, bg=CLR_TRAY); bf.pack(pady=20)
+        def mk_pwr(icon, txt):
+            f = tk.Frame(bf, bg="white", width=260, height=60, highlightbackground="#E0E0E0", highlightthickness=1)
+            f.pack_propagate(False); f.pack(pady=8)
+            l_i = tk.Label(f, text=icon, font=("Arial", 22), fg="#546E7A", bg="white")
+            l_i.pack(side="left", padx=20)
+            l_t = tk.Label(f, text=txt, font=("Arial", 12, "bold"), fg="#37474F", bg="white")
+            l_t.pack(side="left")
+            for w in [f, l_i, l_t]: w.bind("<Button-1>", lambda e: self.close()) 
+        mk_pwr("☾", "Sleep Mode"); mk_pwr("⟳", "Restart System"); mk_pwr("⏻", "Power Off")
+
+    def show_sensors(self):
+        self.clear_content("Sensor Data")
+        box = tk.Frame(self.content, bg="white", padx=20, pady=20, highlightbackground="#E0E0E0", highlightthickness=1)
+        box.pack(pady=20, fill="x")
+        def row(k, v):
+            r = tk.Frame(box, bg="white"); r.pack(fill="x", pady=8)
+            tk.Label(r, text=k, fg="#78909C", bg="white", font=("Arial", 12)).pack(side="left")
+            tk.Label(r, text=v, fg="#37474F", bg="white", font=("Arial", 12, "bold")).pack(side="right")
+        row("CPU Temp", "42°C"); row("Chamber", "24.5°C")
+
+
+    def trigger_connect(self, ssid, password):
+        self.clear_content("Connecting...")
+        tk.Label(self.content, text=f"Joining {ssid}...", font=("Arial", 12), fg=CLR_PRIMARY, bg=CLR_TRAY).pack(pady=30)
+        def run_connect():
+            success = self.c.backend.connect_wifi(ssid, password)
+            self.after(0, lambda: self.show_connection_result(success, ssid))
+        threading.Thread(target=run_connect, daemon=True).start()
+
+    def show_connection_result(self, success, ssid):
+        self.clear_content("Connection Status")
+        color = CLR_SUCCESS if success else CLR_DANGER
+        msg = f"Connected to {ssid}" if success else "Connection Failed"
+        icon = "✓" if success else "⚠"
+        tk.Label(self.content, text=icon, font=("Arial", 40), fg=color, bg=CLR_TRAY).pack(pady=(40, 10))
+        tk.Label(self.content, text=msg, font=("Arial", 14, "bold"), fg=color, bg=CLR_TRAY).pack()
+        self.after(2000, self.show_main_menu)
+
+    def clear_content(self, title):
+        # 1. Destroy old widgets
+        for w in self.content.winfo_children(): w.destroy()
+        
+        # 2. Navigation Bar
+        nav = tk.Frame(self.content, bg=CLR_TRAY)
+        nav.pack(fill="x", pady=(0, 20))
+        
+        # 3. Back Button (Frame acting as button)
+        # cursor="none" removes the mouse pointer
+        btn_frame = tk.Frame(nav, bg=CLR_TRAY, cursor="none") 
+        btn_frame.pack(side="left")
+        
+        btn_lbl = tk.Label(btn_frame, text="❮ Back", font=("Arial", 12, "bold"), fg=CLR_PRIMARY, bg=CLR_TRAY)
+        btn_lbl.pack(padx=5, pady=10)
+        
+        # --- PERMANENT FIX ---
+        # We use 'e=None' so this lambda works if triggered by an event (e is Event) 
+        # OR if triggered manually (e is None).
+        go_back = lambda e=None: self.show_main_menu()
+        
+        for w in [btn_frame, btn_lbl]: 
+            w.bind("<Button-1>", go_back)
+            
+        # 4. Title
+        tk.Label(nav, text=title, font=("Arial", 14, "bold"), fg=CLR_TRAY_TEXT, bg=CLR_TRAY).pack(side="right")
+
+# --- FLOATING BUTTON (Independent Toplevel) ---
+class FloatingSettingsButton(tk.Toplevel):
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self.c = controller
+        
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        
+        w, h = 50, 50
+        screen_w = self.winfo_screenwidth()
+        self.geometry(f"{w}x{h}+{screen_w - w - 15}+15")
+        self.config(bg=CLR_BG, cursor="none")
+        
+        self.cv = tk.Canvas(self, width=w, height=h, bg=CLR_BG, highlightthickness=0)
+        self.cv.pack()
+        
+        self.circle = self.cv.create_oval(2, 2, 48, 48, fill="white", outline="#CFD8DC", width=2, tags="btn")
+        self.icon_id = self.cv.create_text(25, 26, text="⚙", font=("Arial", 28), fill="#455A64", tags="btn")
+        
+        self.cv.tag_bind("btn", "<Button-1>", self.open_tray)
+        self.lift_timer()
+
+    def open_tray(self, e):
+        # Pass the MAIN WINDOW (master) as the parent for the Frame
+        SettingsTray(self.master, self.c, self)
+
+    def lift_timer(self):
+        self.lift()
+        self.after(2000, self.lift_timer)
 
 class CustomPopup(ModalOverlay):
     def __init__(self, parent, title, header, message, color, icon_text, height=290, icon_size=45):
@@ -421,6 +1644,11 @@ class KioskApp(tk.Tk):
         self.calib_blocker = None
         self.calib_status_popup = None
         
+        # --- NEW: FLOATING SETTINGS BUTTON ---
+        # We pass 'self' as parent (root) so it stays tied to app lifecycle
+        # But it is a Toplevel, so it floats above everything
+        self.settings_btn = FloatingSettingsButton(self, self)
+        
         # --- FIX: SHOW WHEN READY ---
         self.deiconify() 
         self.update() 
@@ -444,14 +1672,10 @@ class KioskApp(tk.Tk):
         calib_status = state.get("calib_status", "Idle")
 
         # 0. FORCE SCREEN SWITCH (Fixes Background Blur Issue)
-        # Ensure we are on Calibrate screen BEFORE showing any popups
         if is_calib_active and self.current_page_name != "Calibrate":
             self.show_frame("Calibrate")
             self.update_idletasks()
-            self.update() # Force paint
-            
-            # FIX 1: Reduced delay to 50ms (was 200ms) to minimize "Flash"
-            # but keep it non-zero to ensure the OS paints the background for the blur.
+            self.update() 
             self.after(50, self.start_ui_updater)
             return 
 
@@ -461,7 +1685,7 @@ class KioskApp(tk.Tk):
         if is_locked:
             if not self.calib_blocker: self.calib_blocker = CalibrationBlockerPopup(self)
             
-            # Ensure Status Popup is GONE if locked (Blocker takes precedence)
+            # Ensure Status Popup is GONE if locked
             if self.calib_status_popup:
                 self.calib_status_popup.destroy()
                 self.calib_status_popup = None
@@ -469,8 +1693,6 @@ class KioskApp(tk.Tk):
             if self.calib_blocker: self.calib_blocker.destroy(); self.calib_blocker = None
 
         # 2. CALIBRATION STATUS POPUP (Show only if NOT locked by remote blocker)
-        # We only show specific Homing/Moving popups if the User is doing it locally.
-        # If Remote is doing it, the Blocker covers everything anyway.
         if is_calib_active and not is_locked and calib_status in ["Homing", "Moving"]:
             if not self.calib_status_popup:
                 self.calib_status_popup = CalibrationStatusPopup(self)
@@ -486,21 +1708,17 @@ class KioskApp(tk.Tk):
 
         if self.last_calib_active and not is_calib_active:
             if self.last_calib_source == "Remote":
-                # Check if strictly Calibrated (saved)
                 if state.get("is_calibrated", False) == True:
                     time_now = datetime.now().strftime("%H:%M:%S")
                     msg = f"Calibration finished by Remote Client.\nTime: {time_now}"
                     popup = CustomPopup(self, "Notification", "CALIBRATION DONE", msg, CLR_SUCCESS, "🔔", height=290)
                     self.wait_window(popup)
-                
-                # FIX 2: FORCE RETURN TO HOME
-                # After remote finishes (saved or not), go back to Home.
                 self.show_frame("Home")
 
         self.last_calib_active = is_calib_active
         self.last_calib_source = calib_source
 
-        # ... (Rest of updater logic remains the same) ...
+        # ... (Rest of updater) ...
         if "Running" in state["status"] or "Paused" in state["status"]:
             if self.selected_file.get() != state["filename"]: self.selected_file.set(state["filename"])
 
@@ -545,97 +1763,64 @@ class KioskApp(tk.Tk):
                 self.backend.state["completed"] = False; self.backend.ui_ack_stop()
                 
         self.after(200, self.start_ui_updater)
+
 class Home(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent, bg=CLR_BG)
-        
-        # Reduced card height (350 -> 300) for less empty space
         card = ShadowCard(self, bg=CLR_CARD)
         card.place(relx=0.5, rely=0.5, anchor="center", width=500, height=300)
-        
-        # Updated Version Label & Reduced Padding
-        tk.Label(card.inner, text="Liquid Handler v1.2", font=("Arial", 22, "bold"), bg=CLR_CARD).pack(pady=(20, 25))
-        
-        # Reduced button height & padding for tighter layout
+        tk.Label(card.inner, text="Liquid Handler v1.3", font=("Arial", 22, "bold"), bg=CLR_CARD).pack(pady=(20, 25))
         RoundedButton(card.inner, text="CALIBRATION", width=250, height=55, bg_color="#FF9800", hover_color=CLR_WARNING_HOVER, command=lambda: controller.show_frame("Calibrate")).pack(pady=10)
-        
-        # Changed text "RUN PROTOCOL" -> "PROTOCOLS"
         RoundedButton(card.inner, text="PROTOCOLS", width=250, height=55, bg_color=CLR_PRIMARY, hover_color=CLR_PRIMARY_HOVER, command=lambda: controller.show_frame("ProtocolList")).pack(pady=10)
+
 class Calibrate(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent, bg=CLR_BG)
         self.c = controller
-        
-        # --- HEADER ---
-        header = tk.Frame(self, bg=CLR_BG, pady=5)
-        header.pack(fill="x", pady=(20, 5)) 
+        header = tk.Frame(self, bg=CLR_BG, pady=5); header.pack(fill="x", pady=(20, 5)) 
         tk.Label(header, text="SYSTEM CALIBRATION", font=("Arial", 16, "bold"), bg=CLR_BG, fg=CLR_PRIMARY).pack(side="left", padx=20)
-        
-        main = tk.Frame(self, bg=CLR_BG)
-        main.pack(fill="both", expand=True, padx=10, pady=5)
-        
-        # Adjusted Columns: XY(3), Z(2), Live(1)
-        main.grid_columnconfigure(0, weight=3)
-        main.grid_columnconfigure(1, weight=2)
-        main.grid_columnconfigure(2, weight=1) 
-
-        # 1. XY CARD
+        main = tk.Frame(self, bg=CLR_BG); main.pack(fill="both", expand=True, padx=10, pady=5)
+        main.grid_columnconfigure(0, weight=3); main.grid_columnconfigure(1, weight=2); main.grid_columnconfigure(2, weight=1) 
         xy_outer = tk.Frame(main, bg=CLR_BG); xy_outer.grid(row=0, column=0, sticky="nsew", padx=5)
         self.xy_card = ShadowCard(xy_outer, bg=CLR_CARD, border_color=CLR_PRIMARY); self.xy_card.pack(fill="both", expand=True)
         tk.Label(self.xy_card.inner, text="XY AXIS", font=("Arial", 14, "bold"), bg=CLR_CARD, fg=CLR_PRIMARY).pack(pady=10)
         dpad = tk.Frame(self.xy_card.inner, bg=CLR_CARD); dpad.pack()
-        
         def mk_btn(parent, txt, axis, d): 
             b = RoundedButton(parent, text=txt, command=None, width=78, height=65, bg_color=CLR_INACTIVE, hover_color="#B0BEC5", fg_color="black")
             b.command = lambda: self.move(axis, d, b); return b
-        
         mk_btn(dpad, "Y+", "Y", 1).grid(row=0, column=1, pady=5)
         mk_btn(dpad, "X-", "X", -1).grid(row=1, column=0, padx=3)
         mk_btn(dpad, "X+", "X", 1).grid(row=1, column=2, padx=3)
         mk_btn(dpad, "Y-", "Y", -1).grid(row=2, column=1, pady=5)
-
-        # 2. Z CARD
         z_outer = tk.Frame(main, bg=CLR_BG); z_outer.grid(row=0, column=1, sticky="nsew", padx=5)
         self.z_card = ShadowCard(z_outer, bg=CLR_CARD, border_color=CLR_WARNING); self.z_card.pack(fill="both", expand=True)
         tk.Label(self.z_card.inner, text="Z AXIS", font=("Arial", 14, "bold"), bg=CLR_CARD, fg=CLR_WARNING_DARK).pack(pady=(10, 5))
         z_grid = tk.Frame(self.z_card.inner, bg=CLR_CARD); z_grid.pack()
-        
         def mk_z_btn(parent, txt, axis, d): 
-            # Larger Z buttons
             b = RoundedButton(parent, text=txt, command=None, width=90, height=75, bg_color=CLR_INACTIVE, hover_color="#B0BEC5", fg_color="black")
             b.command = lambda: self.move(axis, d, b); return b
-
         tk.Label(z_grid, text="Z1", font=("Arial", 12, "bold"), bg=CLR_CARD).grid(row=0, column=0, pady=(0, 15), sticky="s")
         mk_z_btn(z_grid, "▲", "Z1", 1).grid(row=1, column=0, pady=(0, 10), padx=15)
         mk_z_btn(z_grid, "▼", "Z1", -1).grid(row=2, column=0, pady=10, padx=15)
-        
         tk.Label(z_grid, text="Z2", font=("Arial", 12, "bold"), bg=CLR_CARD).grid(row=0, column=1, pady=(0, 15), sticky="s")
         mk_z_btn(z_grid, "▲", "Z2", 1).grid(row=1, column=1, pady=(0, 10), padx=15)
         mk_z_btn(z_grid, "▼", "Z2", -1).grid(row=2, column=1, pady=10, padx=15)
-
-        # 3. LIVE CHANGES
         data_outer = tk.Frame(main, bg=CLR_BG); data_outer.grid(row=0, column=2, sticky="nsew", padx=5)
         self.data_card = ShadowCard(data_outer, bg=CLR_CARD, border_color=CLR_SUCCESS); self.data_card.pack(fill="both", expand=True)
         tk.Label(self.data_card.inner, text="LIVE CHANGES", font=("Arial", 14, "bold"), bg=CLR_CARD, fg=CLR_SUCCESS_DARK).pack(pady=10)
-        
-        self.info_box = tk.Frame(self.data_card.inner, bg=CLR_INFO_BOX, padx=10, pady=10)
-        self.info_box.pack(fill="x", pady=5)
-        
+        self.info_box = tk.Frame(self.data_card.inner, bg=CLR_INFO_BOX, padx=10, pady=10); self.info_box.pack(fill="x", pady=5)
         lbl_style = {"font": ("Courier", 14, "bold"), "bg": CLR_INFO_BOX, "fg": "#333"}
         self.lbl_x = tk.Label(self.info_box, text="X : 0.0", **lbl_style); self.lbl_x.pack(anchor="w")
         self.lbl_y = tk.Label(self.info_box, text="Y : 0.0", **lbl_style); self.lbl_y.pack(anchor="w")
         self.lbl_z1 = tk.Label(self.info_box, text="Z1: 0.0", **lbl_style); self.lbl_z1.pack(anchor="w")
         self.lbl_z2 = tk.Label(self.info_box, text="Z2: 0.0", **lbl_style); self.lbl_z2.pack(anchor="w")
-        
         tk.Label(self.data_card.inner, text="STEP SIZE (mm)", font=("Arial", 12, "bold"), bg=CLR_CARD, fg="#555").pack(pady=(15, 5))
         step_f = tk.Frame(self.data_card.inner, bg=CLR_CARD); step_f.pack()
         self.step_btns = {}
         for val in [0.1, 1.0, 10.0]:
             b = RoundedButton(step_f, text=str(val), command=lambda v=val: self.set_step(v), width=50, height=50, bg_color=CLR_INACTIVE, hover_color="#B0BEC5", fg_color="black")
-            b.pack(side="left", padx=3)
-            self.step_btns[val] = b
+            b.pack(side="left", padx=3); self.step_btns[val] = b
         self.set_step(1.0) 
-
         footer = tk.Frame(self, bg=CLR_BG, height=70); footer.pack(side="bottom", fill="x", pady=(2, 10), padx=20)
         RoundedButton(footer, text="EXIT", command=self.confirm_exit, width=120, height=60, bg_color="#9E9E9E", hover_color="#757575").pack(side="left")
         RoundedButton(footer, text="SAVE", command=self.confirm_save, width=120, height=60, bg_color=CLR_SUCCESS, hover_color=CLR_SUCCESS_HOVER).pack(side="right")
@@ -647,76 +1832,48 @@ class Calibrate(tk.Frame):
             else: btn.set_color(CLR_INACTIVE, CLR_INACTIVE_HOVER); btn.itemconfig(btn.text_id, fill="black")
 
     def on_enter(self):
-        # --- FIX: Prevent overriding Remote session ---
-        # If calibration is already active (started by Remote), do NOT override source to "User".
-        # We just update the visual labels and return.
         if self.c.backend.state["calibration_active"]:
-            self.lbl_x.config(text="X : 0.0")
-            self.lbl_y.config(text="Y : 0.0")
-            self.lbl_z1.config(text="Z1: 0.0")
-            self.lbl_z2.config(text="Z2: 0.0")
+            self.lbl_x.config(text="X : 0.0"); self.lbl_y.config(text="Y : 0.0"); self.lbl_z1.config(text="Z1: 0.0"); self.lbl_z2.config(text="Z2: 0.0")
             for k in self.c.offsets: self.c.offsets[k].set(0.0)
             return
-
-        # --- Normal User Start (Only if Idle) ---
         self.c.backend.set_calibration_mode(True, "User")
         self.c.backend.sync_with_server() 
         self.c.backend.ui_send_gcode("T00")
         self.c.update() 
-        
-        self.lbl_x.config(text="X : 0.0")
-        self.lbl_y.config(text="Y : 0.0")
-        self.lbl_z1.config(text="Z1: 0.0")
-        self.lbl_z2.config(text="Z2: 0.0")
+        self.lbl_x.config(text="X : 0.0"); self.lbl_y.config(text="Y : 0.0"); self.lbl_z1.config(text="Z1: 0.0"); self.lbl_z2.config(text="Z2: 0.0")
         for k in self.c.offsets: self.c.offsets[k].set(0.0)
 
-    # --- RESTORED ANIMATION LOGIC ---
     def move(self, axis, direction, btn_instance):
         btn_instance.flash(CLR_PRIMARY)
         step = self.c.step_size.get() * direction
         dx, dy, dz1, dz2 = 0, 0, 0, 0
         current = self.c.offsets[axis].get(); new_val = round(current + step, 2); self.c.offsets[axis].set(new_val)
-        
         target_lbl, axis_prefix = None, ""
         if axis == "X": axis_prefix = "X : "; target_lbl = self.lbl_x; dx = step
         elif axis == "Y": axis_prefix = "Y : "; target_lbl = self.lbl_y; dy = step
         elif axis == "Z1": axis_prefix = "Z1: "; target_lbl = self.lbl_z1; dz1 = step
         elif axis == "Z2": axis_prefix = "Z2: "; target_lbl = self.lbl_z2; dz2 = step
-        
         txt_sign = f"+{step}" if step > 0 else f"{step}"
-        
-        # Trigger Animations
         self.float_animation(target_lbl, txt_sign)
         self.animate_counter(target_lbl, axis_prefix, current, new_val)
-        
         self.c.backend.ui_send_gcode(f"C dx={dx}, dy={dy}, dz1={dz1}, dz2={dz2}")
 
     def float_animation(self, target_widget, text):
         lbl = tk.Label(self.info_box, text=text, fg=CLR_SUCCESS, bg=CLR_INFO_BOX, font=("Arial", 14, "bold"))
-        # FIX: Decreased offset to 110 (was 150) to ensure visibility in narrower column
-        x = target_widget.winfo_x() + 110 
-        y = target_widget.winfo_y()
+        x = target_widget.winfo_x() + 110; y = target_widget.winfo_y()
         lbl.place(x=x, y=y)
-        
         def anim_loop(step=0):
-            if step < 10:
-                lbl.place(y=y - step*2) 
-                self.after(30, lambda: anim_loop(step+1))
-            else:
-                lbl.destroy() 
+            if step < 10: lbl.place(y=y - step*2); self.after(30, lambda: anim_loop(step+1))
+            else: lbl.destroy() 
         anim_loop()
 
     def animate_counter(self, lbl, prefix, start, end, step_count=10):
-        diff = end - start
-        step_size = diff / step_count
-        
+        diff = end - start; step_size = diff / step_count
         def update_step(i):
             if i <= step_count:
-                current = start + (step_size * i)
-                lbl.config(text=f"{prefix}{current:.1f}", fg=CLR_SUCCESS) 
+                current = start + (step_size * i); lbl.config(text=f"{prefix}{current:.1f}", fg=CLR_SUCCESS) 
                 self.after(15, lambda: update_step(i+1))
-            else:
-                lbl.config(text=f"{prefix}{end:.1f}", fg="#333")
+            else: lbl.config(text=f"{prefix}{end:.1f}", fg="#333")
         update_step(1)
 
     def confirm_exit(self):
@@ -729,16 +1886,11 @@ class Calibrate(tk.Frame):
         c = CustomConfirmPopup(self.c, "Save?", "SAVE OFFSETS", "Update calibration settings?")
         if c.result:
             self.update() 
-            # Send Command ONLY
             self.c.backend.ui_send_gcode("OK_C")
-            
-            # REMOVED: self.c.backend.set_calibration_mode(False, None)
-            # We let the Backend listen for C_OK to unlock automatically.
-            
-            popup = CustomPopup(self.c, "Saved", "CALIBRATION SAVED", "Calibration completed.\nSystem is ready to run.", CLR_SUCCESS, "💾", height=300, icon_size=38)
+            popup = CustomPopup(self.c, "Saved", "CALIBRATION COMPLETED", "Offsets saved.\nYou may now run a protocol.", CLR_SUCCESS, "✔", height=300, icon_size=38)
             self.wait_window(popup)
             self.c.show_frame("Home")
-            
+
 class ProtocolList(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent, bg=CLR_BG)
@@ -805,49 +1957,26 @@ class ProtocolList(tk.Frame):
         except Exception as e: print(f"Error refreshing files: {e}")
 
     def create_file_card(self, filename, parent_frame):
-        card = tk.Frame(parent_frame, bg="white", bd=1, relief="solid")
-        card.pack(fill="x", padx=10, pady=6)
-        
-        inner = tk.Frame(card, bg="white", padx=15, pady=15)
-        inner.pack(fill="both", expand=True)
-        
-        # Delete Button
+        card = tk.Frame(parent_frame, bg="white", bd=1, relief="solid"); card.pack(fill="x", padx=10, pady=6)
+        inner = tk.Frame(card, bg="white", padx=15, pady=15); inner.pack(fill="both", expand=True)
         del_btn = None
         if self.current_dir == DIR_RECENT:
-            if self.del_icon_img:
-                del_btn = tk.Label(inner, image=self.del_icon_img, bg="white", cursor="none")
-                del_btn.image = self.del_icon_img
-            else:
-                del_btn = tk.Label(inner, text="X", font=("Arial", 18, "bold"), bg="white", fg=CLR_DANGER)
-            
-            del_btn.pack(side="right", padx=10)
-            # Delete button needs its own click handler (no scroll logic needed usually, but good to bind safely)
-            del_btn.bind("<Button-1>", lambda e: self.delete_file(filename))
-
+            if self.del_icon_img: del_btn = tk.Label(inner, image=self.del_icon_img, bg="white", cursor="none"); del_btn.image = self.del_icon_img
+            else: del_btn = tk.Label(inner, text="X", font=("Arial", 18, "bold"), bg="white", fg=CLR_DANGER)
+            del_btn.pack(side="right", padx=10); del_btn.bind("<Button-1>", lambda e: self.delete_file(filename))
         sel_lbl = tk.Label(inner, text="✔", font=("Arial", 18, "bold"), bg="white", fg=CLR_PRIMARY)
+        icon_lbl = tk.Label(inner, text="📄", font=("Arial", 22), bg="white", fg="#78909C", width=3); icon_lbl.pack(side="left")
+        name_lbl = tk.Label(inner, text=filename, font=("Helvetica", 14, "bold"), bg="white", fg="#263238", anchor="w"); name_lbl.pack(side="left", fill="x", expand=True, padx=5)
         
-        icon_lbl = tk.Label(inner, text="📄", font=("Arial", 22), bg="white", fg="#78909C", width=3)
-        icon_lbl.pack(side="left")
-        
-        name_lbl = tk.Label(inner, text=filename, font=("Helvetica", 14, "bold"), bg="white", fg="#263238", anchor="w")
-        name_lbl.pack(side="left", fill="x", expand=True, padx=5)
-
-        # --- FIX: SMART CLICK HANDLER ---
         def on_click(e):
-            # Calculate total distance moved during the click-press cycle
-            # If moved > 10 pixels, treat as a Scroll (Ignore selection)
-            # If moved < 10 pixels, treat as a Click (Select file)
             dist = abs(e.y_root - self.scroll_frame_widget.scroll_start_y)
-            if dist < 10: 
-                self.select_file(filename, card, inner, icon_lbl, name_lbl, sel_lbl, del_btn)
+            if dist < 10: self.select_file(filename, card, inner, icon_lbl, name_lbl, sel_lbl, del_btn)
 
-        # Bind Drag/Scroll/Click to elements
-        for w in [card, inner, icon_lbl, name_lbl]:
+        for w in [card, inner, icon_lbl, name_lbl]: 
             w.bind("<ButtonPress-1>", self.scroll_frame_widget._start_scroll)
             w.bind("<B1-Motion>", self.scroll_frame_widget._do_scroll)
             w.bind("<ButtonRelease-1>", on_click)
-            
-            
+
     def delete_file(self, filename):
         c = CustomConfirmPopup(self.c, "Delete?", "DELETE FILE", f"Permanently delete\n{filename}?", width=480, height=280)
         if c.result:
@@ -865,22 +1994,14 @@ class ProtocolList(tk.Frame):
         self.c.selected_file.set(filename); self.selected_card = (card_frame, inner_frame, icon, name, sel_indicator, del_btn); self.toggle_start_button(True)
 
     def load_and_run(self):
-        # 1. Block if actively calibrating
         if self.c.backend.state["calibration_active"]:
             popup = CustomPopup(self.c, "Locked", "SYSTEM BUSY", "Cannot run protocol while calibrating.", CLR_WARNING, "⚠")
-            self.c.wait_window(popup)
-            return
-
-        # 2. Block if NOT calibrated (FIXED: No Redirection)
+            self.c.wait_window(popup); return
         if not self.c.backend.state.get("is_calibrated", False):
             popup = CustomPopup(self.c, "Required", "CALIBRATION NEEDED", "You must calibrate the system before running a protocol.", CLR_DANGER, "🛑")
-            self.c.wait_window(popup)
-            return # Simply stop here. Do not change screens.
-
+            self.c.wait_window(popup); return
         if not self.selected_card: return
-        fname = self.c.selected_file.get()
-        self.c.backend.ui_load_and_run(fname)
-        self.c.show_frame("Running")
+        fname = self.c.selected_file.get(); self.c.backend.ui_load_and_run(fname); self.c.show_frame("Running")  
 
 class Running(tk.Frame):
     def __init__(self, parent, controller):
