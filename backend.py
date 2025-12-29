@@ -1,7 +1,5 @@
-# v1.2 backend - Added Calibration Locking Logic
-# v1.2 backend - Added Calibration Status Sequence (Homing -> Moving -> Ready)
-# v1.2 backend - Real Serial Synchronization for Calibration
-# v1.2 backend - Passive Calibration Sync (No Extra G-Code)
+# v1.2 backend - Calibration Logging & Weekly Cleanup
+# v1.2 backend - Split Logs & Improved Naming &error popup in the calibration screen fixed
 import requests
 import serial
 import time
@@ -9,16 +7,22 @@ import os
 import threading
 import queue
 import RPi.GPIO as GPIO
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # --- CONFIGURATION ---
 SERVER_URL = "http://192.168.31.236:5000" 
 BASE_DIR = "/home/lhr/Robot_Client"
 DIR_RECENT = os.path.join(BASE_DIR, "recent_protocols")
 DIR_TEST = os.path.join(BASE_DIR, "test_protocols")
-LOG_DIR = os.path.join(BASE_DIR, "logs")
 
-for d in [DIR_RECENT, DIR_TEST, LOG_DIR]: os.makedirs(d, exist_ok=True)
+# --- LOG DIRECTORIES ---
+LOG_ROOT = os.path.join(BASE_DIR, "logs")
+DIR_PROTO_LOGS = os.path.join(LOG_ROOT, "protocol_logs")
+DIR_CALIB_LOGS = os.path.join(LOG_ROOT, "calibration_logs")
+
+# Ensure all exist
+for d in [DIR_RECENT, DIR_TEST, LOG_ROOT, DIR_PROTO_LOGS, DIR_CALIB_LOGS]: 
+    os.makedirs(d, exist_ok=True)
 
 class RobotClient:
     def __init__(self):
@@ -32,14 +36,17 @@ class RobotClient:
             # --- CALIBRATION STATE ---
             "calibration_active": False,
             "calibration_source": None,
-            "calib_status": "Idle", # "Homing", "Moving", "Ready"
+            "calib_status": "Idle", 
             "is_calibrated": False
         }
         self.command_queue = queue.Queue()
         self.start_time = None; self.smoothed_seconds = 0
-        self.log_accumulator = []; self.current_session_log = None
+        self.log_accumulator = []; self.current_session_log_path = None
         self.server_connected = False; self.expect_reset = False
         self.connection_time = time.time(); self.grace_period = 3.0 
+
+        # --- 1. CLEANUP OLD LOGS ON STARTUP ---
+        self.cleanup_old_logs()
 
         # GPIO
         self.PIN_RESET = 17; self.PIN_PAUSE = 27   
@@ -61,6 +68,30 @@ class RobotClient:
 
         self.is_running = False; self.is_paused = False
         self.protocol_steps = []; self.ptr = 0; self.seq_num = 1 
+
+    # --- UPDATED: CLEANUP BOTH FOLDERS ---
+    def cleanup_old_logs(self, days=7):
+        print("🧹 Checking for old logs...", flush=True)
+        now = time.time()
+        cutoff = now - (days * 86400)
+        count = 0
+        
+        # Helper to clean a specific dir
+        def clean_dir(directory):
+            c = 0
+            try:
+                for f in os.listdir(directory):
+                    fpath = os.path.join(directory, f)
+                    if os.path.isfile(fpath):
+                        if os.path.getctime(fpath) < cutoff:
+                            os.remove(fpath); c += 1
+            except: pass
+            return c
+
+        count += clean_dir(DIR_PROTO_LOGS)
+        count += clean_dir(DIR_CALIB_LOGS)
+        
+        if count > 0: print(f"✅ Deleted {count} logs older than {days} days.")
 
     def hard_reset_pico(self):
         print("⚡ Hard Resetting Pico...", flush=True)
@@ -88,10 +119,24 @@ class RobotClient:
         m, s = divmod(int(seconds), 60); h, m = divmod(m, 60); d, h = divmod(h, 24)
         return f"{d:02}:{h:02}:{m:02}:{s:02}"
 
+    # --- UPDATED: INTELLIGENT LOG PATH SELECTION ---
     def start_new_log_session(self, filename):
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        self.current_session_log = f"{filename}_{timestamp}.log"
-        self.log(f"🚀 Started Protocol: {filename}")
+        
+        # Decide Folder based on content
+        if "Calibration" in filename:
+            target_dir = DIR_CALIB_LOGS
+        else:
+            target_dir = DIR_PROTO_LOGS
+            
+        # Construct Filename (Prevent double timestamping)
+        if timestamp not in filename:
+            name = f"{filename}_{timestamp}.log"
+        else:
+            name = f"{filename}.log"
+            
+        self.current_session_log_path = os.path.join(target_dir, name)
+        self.log(f"🚀 Session Started: {name}")
 
     def log(self, msg):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -99,9 +144,10 @@ class RobotClient:
         print(entry, flush=True); self.state["logs"].append(entry)
         if len(self.state["logs"]) > 5: self.state["logs"].pop(0)
         self.log_accumulator.append(entry)
-        if self.current_session_log:
+        
+        if self.current_session_log_path:
             try:
-                with open(os.path.join(LOG_DIR, self.current_session_log), "a", encoding="utf-8") as f: f.write(entry + "\n")
+                with open(self.current_session_log_path, "a", encoding="utf-8") as f: f.write(entry + "\n")
             except: pass
 
     def sync_with_server(self):
@@ -115,7 +161,7 @@ class RobotClient:
             "calib_active": self.state["calibration_active"],
             "calib_source": self.state["calibration_source"],
             "calib_status": self.state["calib_status"],
-            "is_calibrated": self.state["is_calibrated"] # <--- ADD THIS
+            "is_calibrated": self.state["is_calibrated"]
         }
         self.log_accumulator = [] 
         try:
@@ -137,11 +183,8 @@ class RobotClient:
         # --- CALIB START (Remote) ---
         elif ev == "CALIB_START": 
             self.set_calibration_mode(True, "Remote")
-            # 1. Send Home Command
             if self.ser: 
                 self.ser.write(b"T00\n")
-                self.state["calib_status"] = "Homing"
-                self.sync_with_server()
         elif ev == "CALIB_END": 
             self.set_calibration_mode(False, None)
 
@@ -199,12 +242,24 @@ class RobotClient:
     def ui_stop(self): self.command_queue.put(("STOP", None))
     def ui_ack_start(self): self.state["just_started"] = False
     
+    # --- UPDATED: CALIBRATION LOGGING + NAMING FIX ---
     def set_calibration_mode(self, active, source):
         self.state["calibration_active"] = active
         self.state["calibration_source"] = source
         if active:
-            self.log(f"🔧 Calibration Started by {source}")
-            # Automatically set status to Homing so UI reacts immediately
+            # 1. Fix Naming: Change "User" -> "Local"
+            clean_source = "Local" if source == "User" else source
+            
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            calib_name = f"Calibration_{clean_source}_{timestamp}"
+            
+            # 2. Set as current "filename" so server knows where to log
+            self.state["filename"] = calib_name
+            
+            # 3. Create actual log file on Pi (auto-routes to DIR_CALIB_LOGS)
+            self.start_new_log_session(calib_name)
+            
+            self.log(f"🔧 Calibration Started by {clean_source}")
             self.state["calib_status"] = "Homing" 
             self.sync_with_server()
         else:
@@ -217,7 +272,13 @@ class RobotClient:
         self.state["filename"] = "None"; self.state["started_by"] = "Unknown" 
         self.state["status"] = "Idle"; self.state["current_line"] = "Ready"; self.state["current_desc"] = ""
         self.state["progress"] = 0; self.state["est"] = "--:--:--:--"
-        self.state["is_calibrated"] = False
+        self.state["is_calibrated"] = False # Force recalibration
+        
+        # --- FIX: Force Calibration OFF on Reset/Error ---
+        self.state["calibration_active"] = False
+        self.state["calib_status"] = "Idle"
+        self.state["calibration_source"] = None
+        self.sync_with_server()
 
     def ui_ack_stop(self): self.reset_all_state()
     def ui_ack_error(self): self.reset_all_state()
@@ -277,30 +338,23 @@ class RobotClient:
                     # --- HARDWARE SYNC LOGIC (CALIBRATION) ---
                     if self.state["calibration_active"]:
                         
-                        # 1. Homing Completed?
                         if self.state["calib_status"] == "Homing":
                             if "HOME" in resp: 
                                 self.state["calib_status"] = "Moving"
                                 self.sync_with_server()
                         
-                        # 2. Moving Completed?
                         elif self.state["calib_status"] == "Moving":
                             if resp == "X": 
                                 self.state["calib_status"] = "Ready"
                                 self.sync_with_server()
 
                         # 3. SAVE CONFIRMATION (Unlock Logic)
-                        # We listen for C_OK (or OK_C echo) to confirm save
                         if "C_OK" in resp or "OK_C" in resp: 
                             self.log("✅ Calibration Offsets Saved")
-                            
-                            # --- SET FLAG TRUE ---
                             self.state["is_calibrated"] = True 
-                            
                             self.set_calibration_mode(False, None) # Unlock
-                            # DO NOT call reset_all_state() here, or it will set is_calibrated back to False!
                             self.sync_with_server()
-                            
+
                     if "Initialized" in resp:
                         if self.expect_reset: self.log("✅ Reset Confirmed"); self.expect_reset = False
                         else: 
