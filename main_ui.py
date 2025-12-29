@@ -168,35 +168,50 @@ class ModernProgressBar(tk.Canvas):
         if new_width > 0: self.create_rounded_rect(0, 0, new_width, self.h, radius=self.h, fill=self.fill_color, tags="fill")
         if self.current_pct != self.target_pct: self.after(20, self.animate)
             
-# --- SCROLLABLE FRAME ---
+# --- UPDATED SCROLLABLE FRAME (Scroll vs Click Logic) ---
 class ScrollableFrame(tk.Frame):
     def __init__(self, container, *args, **kwargs):
         super().__init__(container, *args, **kwargs)
         self.canvas = tk.Canvas(self, bg=kwargs.get("bg", "white"), highlightthickness=0)
         self.scrollable_frame = tk.Frame(self.canvas, bg=kwargs.get("bg", "white"))
+        
         self.scrollable_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.window_id = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        
         self.canvas.bind("<Configure>", self._on_canvas_configure)
         self.canvas.pack(side="left", fill="both", expand=True)
+        
         self.last_y = 0
+        self.scroll_start_y = 0  # <--- THIS LINE IS MISSING IN YOUR CODE
 
-    def _on_canvas_configure(self, event): self.canvas.itemconfig(self.window_id, width=event.width)
-    def _start_scroll(self, event): self.last_y = event.y
+    def _on_canvas_configure(self, event):
+        self.canvas.itemconfig(self.window_id, width=event.width)
+
+    def _start_scroll(self, event):
+        self.last_y = event.y_root
+        self.scroll_start_y = event.y_root  # <--- THIS MUST BE HERE TOO
+
     def _do_scroll(self, event):
-        dy = event.y - self.last_y; self.last_y = event.y
+        dy = event.y_root - self.last_y
+        self.last_y = event.y_root
+        
         bbox = self.canvas.bbox("all")
         if not bbox: return
-        content_height = bbox[3]; view_height = self.canvas.winfo_height()
+        
+        content_height = bbox[3]
+        view_height = self.canvas.winfo_height()
         if content_height <= view_height: return
-        fraction = -dy / float(content_height) 
-        current_top, _ = self.canvas.yview(); new_top = current_top + fraction
+
+        fraction = -dy / float(content_height)
+        current_top, _ = self.canvas.yview()
+        new_top = current_top + fraction
+        
         if new_top < 0: new_top = 0
         max_scroll = 1.0 - (view_height / content_height)
         if new_top > max_scroll: new_top = max_scroll
-        self.canvas.yview_moveto(new_top)
-
- # --- BACKGROUND GENERATOR (FIXED) ---
-# --- FIND THIS FUNCTION AND UPDATE IT ---
+            
+        self.canvas.yview_moveto(new_top)# --- FIND THIS FUNCTION AND UPDATE IT ---
+        
 def get_blur_bg(root_window):
     if not HAS_PIL: return None
     try:
@@ -790,19 +805,49 @@ class ProtocolList(tk.Frame):
         except Exception as e: print(f"Error refreshing files: {e}")
 
     def create_file_card(self, filename, parent_frame):
-        card = tk.Frame(parent_frame, bg="white", bd=1, relief="solid"); card.pack(fill="x", padx=10, pady=6)
-        inner = tk.Frame(card, bg="white", padx=15, pady=15); inner.pack(fill="both", expand=True)
+        card = tk.Frame(parent_frame, bg="white", bd=1, relief="solid")
+        card.pack(fill="x", padx=10, pady=6)
+        
+        inner = tk.Frame(card, bg="white", padx=15, pady=15)
+        inner.pack(fill="both", expand=True)
+        
+        # Delete Button
         del_btn = None
         if self.current_dir == DIR_RECENT:
-            if self.del_icon_img: del_btn = tk.Label(inner, image=self.del_icon_img, bg="white", cursor="none"); del_btn.image = self.del_icon_img
-            else: del_btn = tk.Label(inner, text="X", font=("Arial", 18, "bold"), bg="white", fg=CLR_DANGER)
-            del_btn.pack(side="right", padx=10); del_btn.bind("<Button-1>", lambda e: self.delete_file(filename))
-        sel_lbl = tk.Label(inner, text="✔", font=("Arial", 18, "bold"), bg="white", fg=CLR_PRIMARY)
-        icon_lbl = tk.Label(inner, text="📄", font=("Arial", 22), bg="white", fg="#78909C", width=3); icon_lbl.pack(side="left")
-        name_lbl = tk.Label(inner, text=filename, font=("Helvetica", 14, "bold"), bg="white", fg="#263238", anchor="w"); name_lbl.pack(side="left", fill="x", expand=True, padx=5)
-        def on_click(e): self.select_file(filename, card, inner, icon_lbl, name_lbl, sel_lbl, del_btn)
-        for w in [card, inner, icon_lbl, name_lbl]: w.bind("<ButtonPress-1>", self.scroll_frame_widget._start_scroll); w.bind("<B1-Motion>", self.scroll_frame_widget._do_scroll); w.bind("<ButtonRelease-1>", on_click)
+            if self.del_icon_img:
+                del_btn = tk.Label(inner, image=self.del_icon_img, bg="white", cursor="none")
+                del_btn.image = self.del_icon_img
+            else:
+                del_btn = tk.Label(inner, text="X", font=("Arial", 18, "bold"), bg="white", fg=CLR_DANGER)
+            
+            del_btn.pack(side="right", padx=10)
+            # Delete button needs its own click handler (no scroll logic needed usually, but good to bind safely)
+            del_btn.bind("<Button-1>", lambda e: self.delete_file(filename))
 
+        sel_lbl = tk.Label(inner, text="✔", font=("Arial", 18, "bold"), bg="white", fg=CLR_PRIMARY)
+        
+        icon_lbl = tk.Label(inner, text="📄", font=("Arial", 22), bg="white", fg="#78909C", width=3)
+        icon_lbl.pack(side="left")
+        
+        name_lbl = tk.Label(inner, text=filename, font=("Helvetica", 14, "bold"), bg="white", fg="#263238", anchor="w")
+        name_lbl.pack(side="left", fill="x", expand=True, padx=5)
+
+        # --- FIX: SMART CLICK HANDLER ---
+        def on_click(e):
+            # Calculate total distance moved during the click-press cycle
+            # If moved > 10 pixels, treat as a Scroll (Ignore selection)
+            # If moved < 10 pixels, treat as a Click (Select file)
+            dist = abs(e.y_root - self.scroll_frame_widget.scroll_start_y)
+            if dist < 10: 
+                self.select_file(filename, card, inner, icon_lbl, name_lbl, sel_lbl, del_btn)
+
+        # Bind Drag/Scroll/Click to elements
+        for w in [card, inner, icon_lbl, name_lbl]:
+            w.bind("<ButtonPress-1>", self.scroll_frame_widget._start_scroll)
+            w.bind("<B1-Motion>", self.scroll_frame_widget._do_scroll)
+            w.bind("<ButtonRelease-1>", on_click)
+            
+            
     def delete_file(self, filename):
         c = CustomConfirmPopup(self.c, "Delete?", "DELETE FILE", f"Permanently delete\n{filename}?", width=480, height=280)
         if c.result:
@@ -826,13 +871,11 @@ class ProtocolList(tk.Frame):
             self.c.wait_window(popup)
             return
 
-        # 2. Block if NOT calibrated (New Requirement)
+        # 2. Block if NOT calibrated (FIXED: No Redirection)
         if not self.c.backend.state.get("is_calibrated", False):
             popup = CustomPopup(self.c, "Required", "CALIBRATION NEEDED", "You must calibrate the system before running a protocol.", CLR_DANGER, "🛑")
             self.c.wait_window(popup)
-            # Optional: Switch to calibrate screen automatically
-            self.c.show_frame("Calibrate")
-            return
+            return # Simply stop here. Do not change screens.
 
         if not self.selected_card: return
         fname = self.c.selected_file.get()
