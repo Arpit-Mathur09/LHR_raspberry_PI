@@ -1,5 +1,4 @@
-# v1.2 backend - Calibration Logging & Weekly Cleanup
-# v1.2 backend - Split Logs & Improved Naming &error popup in the calibration screen fixed
+
 import requests
 import serial
 import time
@@ -10,6 +9,23 @@ import RPi.GPIO as GPIO
 from datetime import datetime, timedelta
 import subprocess
 import glob
+
+
+# --- ADD THESE IMPORTS AT TOP ---
+import random 
+# Try importing hardware libraries, fail gracefully if missing
+try:
+    import smbus2
+    import board
+    import neopixel # Requires: pip install rpi_ws281x adafruit-circuitpython-neopixel
+    HARDWARE_AVAILABLE = True
+except ImportError:
+    HARDWARE_AVAILABLE = False
+
+try:
+    import bme280 # Requires: pip install RPi.bme280
+except ImportError:
+    bme280 = None
 # --- CONFIGURATION ---
 SERVER_URL = "http://192.168.31.236:5000" 
 BASE_DIR = "/home/lhr/Robot_Client"
@@ -24,6 +40,97 @@ DIR_CALIB_LOGS = os.path.join(LOG_ROOT, "calibration_logs")
 # Ensure all exist
 for d in [DIR_RECENT, DIR_TEST, LOG_ROOT, DIR_PROTO_LOGS, DIR_CALIB_LOGS]: 
     os.makedirs(d, exist_ok=True)
+
+# --- 1. SENSOR MANAGER CLASS ---
+class SensorManager:
+    def __init__(self):
+        self.bus = None
+        self.bme_address = 0x76 # Default I2C address (sometimes 0x77)
+        
+        try:
+            # Initialize I2C Bus
+            self.bus = smbus2.SMBus(1)
+            
+            # Load BME280 Calibration Parameters (Critical for accuracy)
+            if bme280:
+                self.bme_calibration = bme280.load_calibration_params(self.bus, self.bme_address)
+        except Exception as e:
+            print(f"⚠️ Sensor Init Error: {e}")
+
+    def get_cpu_temp(self):
+        try:
+            with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+                return round(int(f.read()) / 1000.0, 1)
+        except: return 0.0
+
+    def get_cpu_usage(self):
+        try:
+            with open("/proc/loadavg", "r") as f:
+                load = float(f.read().split()[0])
+            return min(100, round((load / 4.0) * 100, 1))
+        except: return 0.0
+
+    
+
+    def get_bme280(self):
+        # REAL READING LOGIC
+        if not self.bus or not bme280:
+            # Fallback if disconnected
+            return {"temp": 0, "hum": 0, "press": 0}
+            
+        try:
+            # Read single sample
+            data = bme280.sample(self.bus, self.bme_address, self.bme_calibration)
+            return {
+                "temp": round(data.temperature, 1),
+                "hum": round(data.humidity, 1),
+                "press": round(data.pressure, 1)
+            }
+        except Exception:
+            # If read fails (e.g. loose wire), return 0
+            return {"temp": 0, "hum": 0, "press": 0}
+
+    def get_adt75(self):
+        # ADT75 (Address 0x48)
+        if not self.bus: return 0.0
+        try:
+            data = self.bus.read_i2c_block_data(0x48, 0, 2)
+            val = (data[0] << 8) | data[1]
+            val >>= 4
+            return val * 0.0625
+        except: return 0.0
+
+    def get_all(self):
+        bme = self.get_bme280()
+        return {
+            "cpu_temp": self.get_cpu_temp(),
+            "cpu_load": self.get_cpu_usage(),
+            
+            
+            "bme_temp": bme["temp"],
+            "bme_hum": bme["hum"],
+            "bme_press": bme["press"],
+            "adt_temp": self.get_adt75()
+        }
+
+# --- 2. LIGHT CONTROLLER (WS2812) ---
+class LightController:
+    def __init__(self, pin=18, num_pixels=8):
+        self.active = False
+        self.strip = None
+        if HARDWARE_AVAILABLE:
+            try:
+                # Defaulting to GPIO 18 (PWM0)
+                self.strip = neopixel.NeoPixel(board.D18, num_pixels, brightness=0.5, auto_write=False)
+            except: pass
+
+    def toggle(self, state):
+        self.active = state
+        if not self.strip: return
+        
+        color = (255, 255, 255) if state else (0, 0, 0)
+        self.strip.fill(color)
+        self.strip.show()
 
 class RobotClient:
     def __init__(self):
@@ -40,6 +147,19 @@ class RobotClient:
             "calib_status": "Idle", 
             "is_calibrated": False
         }
+        self.PIN_LID_SWITCH = 22 # Change to your actual pin
+        GPIO.setup(self.PIN_LID_SWITCH, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        
+        # Add to state
+        self.state["lid_open"] = False
+        
+        self.sensors = SensorManager()
+        self.lights = LightController(pin=18, num_pixels=12) # Adjust pixel count here
+        
+        # Add to State
+        self.state["light_on"] = False
+        self.state["sensor_data"] = {}
+        
         self.command_queue = queue.Queue()
         self.start_time = None; self.smoothed_seconds = 0
         self.log_accumulator = []; self.current_session_log_path = None
@@ -75,6 +195,14 @@ class RobotClient:
         # ... keep your existing socket/server connection code here ...
         print(f"DEBUG: Backlight Path: {self.backlight_path}")
         
+    def toggle_light(self):
+        """Toggles WS2812 LEDs."""
+        new_state = not self.state["light_on"]
+        self.state["light_on"] = new_state
+        self.lights.toggle(new_state)
+        self.log(f"💡 Light {'ON' if new_state else 'OFF'}")
+        self.sync_with_server() # Push change to server
+         
     def get_connected_ssid(self):
         """Reliably gets the current WiFi SSID."""
         # Method 1: Try 'iwgetid' (Standard on Raspberry Pi)
@@ -316,6 +444,9 @@ class RobotClient:
             except: pass
 
     def sync_with_server(self):
+        is_open = GPIO.input(self.PIN_LID_SWITCH) == GPIO.HIGH
+        self.state["lid_open"] = is_open
+        self.state["sensor_data"] = self.sensors.get_all()
         line_txt = self.state["current_line"]
         if self.state["current_desc"]: line_txt += f" ({self.state['current_desc']})"
         payload = {
@@ -326,7 +457,15 @@ class RobotClient:
             "calib_active": self.state["calibration_active"],
             "calib_source": self.state["calibration_source"],
             "calib_status": self.state["calib_status"],
-            "is_calibrated": self.state["is_calibrated"]
+            "is_calibrated": self.state["is_calibrated"],
+            
+            "file": self.state["filename"],
+            "status": self.state["status"],
+            
+            # ADD THESE NEW FIELDS
+            "light_on": self.state["light_on"],
+            "sensors": self.state["sensor_data"],
+            "lid_open": self.state["lid_open"]
         }
         self.log_accumulator = [] 
         try:
@@ -460,7 +599,8 @@ class RobotClient:
         while True:
             self.calculate_estimate()
             if time.time() - last_sync > 0.5: self.sync_with_server(); last_sync = time.time()
-
+            
+        
             try:
                 while not self.command_queue.empty():
                     cmd_type, data = self.command_queue.get_nowait()
@@ -469,6 +609,13 @@ class RobotClient:
                     elif cmd_type == "LOAD_LOCAL": fname, source = data; self.load_local_protocol(fname, source); waiting_for_response = False
                     elif cmd_type == "DOWNLOAD_AND_RUN": fname, source = data; self.download_protocol(fname, source); waiting_for_response = False
                     
+                    # 2. RUNTIME COMMANDS (Guard Clause Added)
+                    # If we have no steps loaded, IGNORE these commands
+                    # to prevent "Running: None" ghost state.
+                    elif not self.protocol_steps:
+                        self.log(f"⚠️ Ignored {cmd_type} (No Protocol Loaded)")
+                        continue
+                    
                     elif cmd_type == "STOP" or cmd_type == "REMOTE_STOP":
                         source = "Remote" if cmd_type == "REMOTE_STOP" else "User"
                         self.is_running = False; self.log(f"🛑 STOPPED ({source})")
@@ -476,24 +623,34 @@ class RobotClient:
                         self.state["status"] = f"Stopped ({source})"; self.state["stop_reason"] = source 
                         self.expect_reset = True; waiting_for_response = False; self.hard_reset_pico()
 
+                    # --- PAUSE / RESUME LOGIC ---
                     elif cmd_type in ["TOGGLE_PAUSE", "REMOTE_PAUSE", "REMOTE_RESUME"]:
                         should_pause = False
                         if cmd_type == "REMOTE_PAUSE": should_pause = True
                         elif cmd_type == "REMOTE_RESUME": should_pause = False
                         else: should_pause = not self.is_paused 
+                        
                         self.is_paused = should_pause
                         
                         if self.is_paused:
                             reason = "Remote" if cmd_type == "REMOTE_PAUSE" else "User"
-                            self.state["pause_reason"] = reason; self.state["status"] = f"Paused ({reason})"
-                            GPIO.output(self.PIN_PAUSE, 1); self.log(f"⏸ PAUSE ({reason})")
+                            self.state["pause_reason"] = reason
+                            self.state["status"] = f"Paused ({reason})"
+                            GPIO.output(self.PIN_PAUSE, 1)
+                            self.log(f"⏸ PAUSE ({reason})")
                         else:
                             source = "Remote" if cmd_type == "REMOTE_RESUME" else "User"
                             if self.state["pause_reason"] == "System": 
                                 self.log(f"▶ RESUME ({source}) - Advancing Wait Command")
-                                self.ptr += 1; self.seq_num += 1; waiting_for_response = False 
-                            else: self.log(f"▶ RESUME ({source})")
-                            self.state["status"] = "Running"; self.state["pause_reason"] = None; GPIO.output(self.PIN_PAUSE, 0) 
+                                self.ptr += 1
+                                self.seq_num += 1
+                                waiting_for_response = False 
+                            else: 
+                                self.log(f"▶ RESUME ({source})")
+                            
+                            self.state["status"] = "Running"
+                            self.state["pause_reason"] = None
+                            GPIO.output(self.PIN_PAUSE, 0)
             except: pass
 
             if self.ser and self.ser.in_waiting:
