@@ -420,6 +420,41 @@ class BulbIcon(tk.Canvas):
         # Tip
         self.create_oval(cx-2, cy+14, cx+2, cy+16, fill="#78909C", outline="")
 
+class DoorIcon(tk.Canvas):
+    def __init__(self, parent, size=60, bg_color="#FFFFFF"):
+        super().__init__(parent, width=size, height=size, bg=bg_color, highlightthickness=0)
+        self.size = size
+        self.is_open = False
+        self.draw()
+
+    def set_state(self, is_open, new_bg):
+        self.is_open = is_open
+        self.config(bg=new_bg)
+        self.draw()
+
+    def draw(self):
+        self.delete("all")
+        w, h = self.size, self.size
+        cx, cy = w/2, h/2
+        
+        # Draw Frame (Always visible)
+        self.create_rectangle(10, 5, w-10, h-5, width=3, outline="#546E7A")
+
+        if self.is_open:
+            # DANGER: Door swinging open (Trapezoid)
+            # Fill is a lighter red to stand out against the red bg
+            points = [10, 5,  w-20, 15,  w-20, h-15,  10, h-5]
+            self.create_polygon(points, fill="#FFCDD2", outline="#C62828", width=2)
+            
+            # Warning Exclamation
+            self.create_text(w-15, cy, text="!", font=("Arial", 22, "bold"), fill="#C62828")
+        else:
+            # SAFE: Door closed (Rectangle fills frame)
+            # Fill is a lighter green
+            self.create_rectangle(12, 7, w-12, h-7, fill="#C8E6C9", outline="#2E7D32", width=2)
+            
+            # Handle
+            self.create_oval(w-22, cy-4, w-14, cy+4, fill="white", outline="#2E7D32")
 # --- CUSTOM WIFI ICON (Canvas Drawing - Guaranteed to Show) ---
 # --- CUSTOM WIFI ICON (Dynamic Color) ---
 class WiFiIcon(tk.Canvas):
@@ -809,11 +844,73 @@ class WifiPasswordPopup(tk.Toplevel):
         if self.kb_win: self.kb_win.destroy()
         self.destroy()
         self.on_connect(self.ssid, pwd)
+#  --- SMOOTH SCROLL (With Noise Filtering) ---
+class SmoothScroll(tk.Canvas):
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent, **kwargs)
+        
+        # Tuning
+        self.threshold = 5      # Pixel movement required to START scrolling
+        self.filter_size = 4    # Number of coordinates to average (Higher = Smoother but slower)
+        
+        self.scrolling = False
+        self.start_y = 0
+        self.history = []       # Stores recent Y coordinates for averaging
 
+        self.bind("<Button-1>", self.on_start)
+        self.bind("<B1-Motion>", self.on_drag)
+        self.bind("<ButtonRelease-1>", self.on_release)
 
-# --- CUSTOM ROUNDED TILE (Replaces Square Frames) ---
-# --- CUSTOM ROUNDED TILE (No Cursor) ---
- # --- CUSTOM ROUNDED TILE (Robust Clicking) ---
+    def bind_recursive(self, widget):
+        widget.bind("<Button-1>", self.on_start, add="+")
+        widget.bind("<B1-Motion>", self.on_drag, add="+")
+        widget.bind("<ButtonRelease-1>", self.on_release, add="+")
+        for child in widget.winfo_children():
+            self.bind_recursive(child)
+
+    def on_start(self, event):
+        self.start_y = event.y
+        self.scrolling = False
+        self.history = [event.y] * self.filter_size # Reset filter
+        self.scan_mark(event.x, event.y)
+
+    def on_drag(self, event):
+        # 1. Add current position to history
+        self.history.append(event.y)
+        if len(self.history) > self.filter_size:
+            self.history.pop(0)
+            
+        # 2. Calculate Smoothed Y (Average)
+        avg_y = sum(self.history) // len(self.history)
+        
+        delta = avg_y - self.start_y
+        
+        # 3. START THRESHOLD (Prevents accidental jitters when tapping)
+        if not self.scrolling:
+            if abs(delta) < self.threshold: return
+            self.scrolling = True
+
+        # 4. BOUNDARY CHECK
+        top, bot = self.yview()
+        if top <= 0.0 and bot >= 1.0: return  # Content fits on screen -> Lock
+        if top <= 0.0 and delta > 0:          # Stop at Top
+            self.scan_mark(event.x, avg_y)
+            self.start_y = avg_y
+            return
+        if bot >= 1.0 and delta < 0:          # Stop at Bottom
+            self.scan_mark(event.x, avg_y)
+            self.start_y = avg_y
+            return
+
+        # 5. EXECUTE SCROLL (Using averaged Y)
+        # We pass 'gain=1' for natural 1:1 tracking
+        self.scan_dragto(event.x, avg_y, gain=1)
+
+    def on_release(self, event):
+        self.scrolling = False
+        self.history = []
+        
+
 class RoundedTile(tk.Canvas):
     def __init__(self, parent, width=125, height=110, bg_color="#FFFFFF", border_color="#E0E0E0", command=None):
         super().__init__(parent, width=width, height=height, bg=CLR_TRAY, highlightthickness=0, cursor="none")
@@ -822,27 +919,37 @@ class RoundedTile(tk.Canvas):
         self.base_bg = bg_color
         self.border_col = border_color
         self.command = command
-        
         self.icon_widget = None 
+        
+        # Click Tracking
         self.is_pressed = False
+        self.start_x = 0
+        self.start_y = 0
+        self.tap_tolerance = 15 # Pixels (High tolerance = easier to click)
         
         self.draw(self.base_bg, self.border_col)
         
-        # 1. Bind Background
+        # Bind Canvas
         self.bind("<Button-1>", self.on_press)
         self.bind("<ButtonRelease-1>", self.on_release)
         
-        # 2. CRITICAL FIX: Bind Content (Text/Shapes) directly
-        # This ensures clicking the text label doesn't ignore the command
-        self.tag_bind("content", "<Button-1>", self.on_press)
-        self.tag_bind("content", "<ButtonRelease-1>", self.on_release)
+        # Bind Internal Items
+        self.tag_bind("all", "<Button-1>", self.on_press)
+        self.tag_bind("all", "<ButtonRelease-1>", self.on_release)
 
     def set_icon_widget(self, widget):
         self.icon_widget = widget
         widget.config(cursor="none")
-        # Pass widget clicks to tile logic
+        
+        # Forward events
         widget.bind("<Button-1>", self.on_press)
         widget.bind("<ButtonRelease-1>", self.on_release)
+        
+        if hasattr(widget, "winfo_children"):
+            for child in widget.winfo_children():
+                child.config(cursor="none")
+                child.bind("<Button-1>", self.on_press)
+                child.bind("<ButtonRelease-1>", self.on_release)
 
     def round_rect(self, x1, y1, x2, y2, radius=25, **kwargs):
         points = [x1+radius, y1, x1+radius, y1, x2-radius, y1, x2-radius, y1, x2, y1, x2, y1+radius, x2, y1+radius, x2, y2-radius, x2, y2-radius, x2, y2, x2-radius, y2, x2-radius, y2, x1+radius, y2, x1+radius, y2, x1, y2, x1, y2-radius, x1, y2-radius, x1, y1+radius, x1, y1+radius, x1, y1]
@@ -859,7 +966,6 @@ class RoundedTile(tk.Canvas):
         self.base_bg = new_bg
         self.border_col = new_border
         self.draw(new_bg, new_border)
-        
         if self.icon_widget:
             self.icon_widget.config(bg=new_bg)
             if hasattr(self.icon_widget, 'bg_color'):
@@ -868,6 +974,11 @@ class RoundedTile(tk.Canvas):
 
     def on_press(self, e):
         self.is_pressed = True
+        # Record where the finger started
+        self.start_x = e.x_root
+        self.start_y = e.y_root
+        
+        # Visual Feedback
         self.draw(CLR_ACCENT_BG, CLR_PRIMARY)
         if self.icon_widget: 
             self.icon_widget.config(bg=CLR_ACCENT_BG)
@@ -875,8 +986,16 @@ class RoundedTile(tk.Canvas):
         
     def on_release(self, e):
         self.after(100, lambda: self.restore_visuals())
+        
         if self.is_pressed and self.command:
-            self.command(None)
+            # CALCULATE MOVEMENT DISTANCE
+            dist = abs(e.x_root - self.start_x) + abs(e.y_root - self.start_y)
+            
+            # THE FIX: If moved less than 15px, treat as CLICK. 
+            # If moved more, treat as scroll/jitter and IGNORE.
+            if dist < self.tap_tolerance:
+                self.command(None)
+                
         self.is_pressed = False
 
     def restore_visuals(self):
@@ -1039,56 +1158,6 @@ class MarqueeLabel(tk.Canvas):
             self.animating = False
 
 
-# --- REUSABLE SMOOTH SCROLL CLASS ---
-class SmoothScroll(tk.Canvas):
-    def __init__(self, parent, **kwargs):
-        super().__init__(parent, **kwargs)
-        self.bind("<Button-1>", self.on_start)
-        self.bind("<B1-Motion>", self.on_drag)
-        self.bind("<ButtonRelease-1>", self.on_release)
-        
-        self.start_y = 0
-        self.scrolling = False
-        
-        # Tuning
-        self.damping = 2.0    
-        self.threshold = 8    
-
-    def on_start(self, event):
-        self.start_y = event.y
-        self.scrolling = False
-        self.scan_mark(event.x, event.y)
-
-    def on_drag(self, event):
-        # 1. CONTENT SIZE CHECK
-        # Get the total area of the content
-        bbox = self.bbox("all")
-        if not bbox: return # Empty list
-        
-        content_height = bbox[3] - bbox[1]
-        visible_height = self.winfo_height()
-
-        # CRITICAL FIX: If content fits on screen, STOP dragging
-        if content_height <= visible_height:
-            return
-
-        # 2. Threshold Check (Noise Filter)
-        delta = abs(event.y - self.start_y)
-        if not self.scrolling and delta < self.threshold:
-            return
-            
-        self.scrolling = True
-        
-        # 3. Apply Scroll
-        self.scan_dragto(event.x, event.y, gain=1)
-        
-        # 4. RUBBER BANDING / LIMITS (Optional but recommended)
-        # This prevents dragging too far into empty space even if list is long.
-        # Tkinter's scan_dragto is unbounded, but the "content size check" above
-        # solves 90% of the "single item flying away" issues.
-
-    def on_release(self, event):
-        self.scrolling = False
 
 class SettingsTray(tk.Frame):
     def __init__(self, parent_root, controller, floating_btn):
@@ -1154,65 +1223,97 @@ class SettingsTray(tk.Frame):
         # 1. Gather Data
         current_bright = 50
         wifi_connected = False
-        if hasattr(self.c, 'backend'):
-             current_bright = self.c.backend.get_brightness()
-             ssid = self.c.backend.get_connected_ssid()
-             if ssid: wifi_connected = True
+        lid_status = False 
         
+        if hasattr(self.c, 'backend'):
+            current_bright = self.c.backend.get_brightness()
+            ssid = self.c.backend.get_connected_ssid()
+            if ssid: wifi_connected = True
+            lid_status = self.c.backend.state.get("lid_open", False)
+
         for w in self.content.winfo_children(): w.destroy()
-        grid = tk.Frame(self.content, bg=CLR_TRAY, cursor="none")
+        
+        grid = tk.Frame(self.content, bg=CLR_TRAY)
         grid.pack(anchor="center", pady=10)
         
-        def get_sun_color(pct):
-            if pct < 30: return "#90A4AE"
-            elif pct < 70: return "#FBC02D"
-            else: return "#FF9800"
-        sun_col = get_sun_color(current_bright)
+        # --- COLORS ---
+        sun_col = "#FBC02D" if current_bright > 30 else "#90A4AE"
+        wifi_col = CLR_PRIMARY if wifi_connected else "#E0E0E0"
+        
+        is_light_on = self.c.backend.state.get("light_on", False) if hasattr(self.c, 'backend') else False
+        light_border = "#FFD54F" if is_light_on else "#E0E0E0"
+        
+        # --- LID COLOR LOGIC ---
+        if lid_status: 
+            # OPEN = DANGER
+            lid_bg = "#FFEBEE"     
+            lid_border = "#EF5350" 
+            lid_text_col = "#C62828"
+            lid_label = "Lid Open"
+        else:
+            # CLOSED = SAFE
+            lid_bg = "#E8F5E9"     
+            lid_border = "#66BB6A" 
+            lid_text_col = "#2E7D32"
+            lid_label = "Lid Closed"
 
-        def mk_tile(parent, icon_char, text, col, row, cmd, custom_icon_cls=None, border_col="#E0E0E0", icon_col="#546E7A"):
-            
-            # Create Tile
-            tile = RoundedTile(parent, width=125, height=110, bg_color=CLR_TILE_BG, border_color=border_col, command=cmd)
+        # --- TILE CREATOR (FIXED: Added icon_col back) ---
+        def mk_tile(parent, icon_char, text, col, row, cmd, custom_icon_cls=None, border_col="#E0E0E0", bg_col=CLR_TILE_BG, text_col="#455A64", icon_col="#546E7A"):
+            tile = RoundedTile(parent, width=125, height=110, bg_color=bg_col, border_color=border_col, command=cmd)
             tile.grid(row=row, column=col, padx=8, pady=8)
             
-            # --- Icon ---
             if custom_icon_cls:
                 if custom_icon_cls == SunIcon:
-                    icon_widget = custom_icon_cls(tile, size=60, bg_color=CLR_TILE_BG, brightness=current_bright)
+                    icn = custom_icon_cls(tile, size=60, bg_color=bg_col, brightness=current_bright)
                 elif custom_icon_cls == WiFiIcon:
-                    icon_widget = custom_icon_cls(tile, size=60, bg_color=CLR_TILE_BG, is_connected=wifi_connected)
+                    icn = custom_icon_cls(tile, size=60, bg_color=bg_col, is_connected=wifi_connected)
+                elif custom_icon_cls == DoorIcon:
+                    icn = custom_icon_cls(tile, size=60, bg_color=bg_col)
+                    icn.set_state(lid_status, bg_col)
                 else:
-                    icon_widget = custom_icon_cls(tile, size=60, bg_color=CLR_TILE_BG)
-                
-                # Center icon (tag="content" ensures it is bound)
-                tile.create_window(62, 45, window=icon_widget, tags="content")
-                tile.set_icon_widget(icon_widget)
+                    icn = custom_icon_cls(tile, size=60, bg_color=bg_col)
 
-                if custom_icon_cls == BulbIcon:
-                    self.bulb_widgets = {"tile": tile, "icon": icon_widget, "text_id": None}
+                tile.create_window(62, 45, window=icn, tags="content")
+                tile.set_icon_widget(icn)
+                if custom_icon_cls == BulbIcon: self.bulb_widgets = {"tile": tile, "icon": icn}
             else:
-                # Text Icon (tag="content" allows click-through)
+                # Text-based icons (Thermometer, etc.)
+                # FIX: We now use the passed 'icon_col' correctly
                 tile.create_text(62, 45, text=icon_char, font=("Arial", 32), fill=icon_col, tags="content")
 
-            # --- Text Label (tag="content" allows click-through) ---
-            t_id = tile.create_text(62, 90, text=text, font=("Arial", 10, "bold"), fill="#455A64", tags="content")
-            
-            if custom_icon_cls == BulbIcon: self.bulb_widgets["text_id"] = t_id
+            # Label Text
+            tile.create_text(62, 90, text=text, font=("Arial", 11, "bold"), fill=text_col, tags="content")
+            return tile
 
-        # --- LAYOUT ---
-        wifi_col = CLR_PRIMARY if wifi_connected else "#E0E0E0"
+        # --- ROW 0 ---
         mk_tile(grid, None, "WiFi", 0, 0, lambda e: self.show_wifi(), custom_icon_cls=WiFiIcon, border_col=wifi_col)
         mk_tile(grid, None, "Display", 1, 0, lambda e: self.show_brightness(), custom_icon_cls=SunIcon, border_col=sun_col)
         
-        light_border = "#FFD54F" if self.c.light_on else "#E0E0E0"
+        # --- ROW 1 ---
         mk_tile(grid, None, "Light", 0, 1, lambda e: self.toggle_light(), custom_icon_cls=BulbIcon, border_col=light_border)
+        
+        # Sensors (This line caused the error, now it works because icon_col is back)
         mk_tile(grid, "🌡", "Sensors", 1, 1, lambda e: self.show_sensors(), border_col=CLR_SUCCESS, icon_col=CLR_SUCCESS)
         
-        mk_tile(grid, "⏻", "Power", 0, 2, lambda e: self.show_power(), border_col=CLR_DANGER, icon_col=CLR_DANGER)
-        mk_tile(grid, "ℹ", "Info", 1, 2, lambda e: self.show_about(), border_col="#546E7A", icon_col="#546E7A")
-        
-        self.update_bulb_visuals()
+        # --- ROW 2 ---
+        mk_tile(grid, None, lid_label, 0, 2, lambda e: None, custom_icon_cls=DoorIcon, border_col=lid_border, bg_col=lid_bg, text_col=lid_text_col)
 
+        # STACKED BUTTONS
+        stack_frame = tk.Frame(grid, bg=CLR_TRAY)
+        stack_frame.grid(row=2, column=1, padx=8, pady=8, sticky="nsew")
+        
+        def mk_mini_tile(parent, text, icon, color, cmd):
+            mt = RoundedTile(parent, width=125, height=50, bg_color=CLR_TILE_BG, border_color=color, command=cmd)
+            mt.pack(pady=3)
+            mt.create_text(25, 25, text=icon, font=("Arial", 16), fill=color, tags="content")
+            mt.create_text(75, 25, text=text, font=("Arial", 11, "bold"), fill="#455A64", tags="content")
+            return mt
+
+        mk_mini_tile(stack_frame, "Info", "ℹ", "#546E7A", lambda e: self.show_about())
+        mk_mini_tile(stack_frame, "Power", "⏻", CLR_DANGER, lambda e: self.show_power())
+        
+        self.update_bulb_visuals()  
+   
     def show_about(self):
         # UPDATED TO V1.3
         popup = CustomPopup(self.winfo_toplevel(), "About", "SYSTEM INFO", 
@@ -1221,25 +1322,39 @@ class SettingsTray(tk.Frame):
         self.wait_window(popup)
 
     def update_bulb_visuals(self):
-        if not self.bulb_widgets: return
-        is_on = self.c.light_on
-        
-        bg_c = "#FFF9C4" if is_on else CLR_TILE_BG
-        fg_text = "#FBC02D" if is_on else "#455A64"
-        border_c = "#FBC02D" if is_on else "#E0E0E0"
-        
-        # Update Tile Colors
-        self.bulb_widgets["tile"].update_colors(bg_c, border_c)
-        
-        # Update Text Color (Canvas Text)
-        self.bulb_widgets["tile"].itemconfig(self.bulb_widgets["text_id"], fill=fg_text)
-        
-        # Update Icon
-        self.bulb_widgets["icon"].set_state(is_on, bg_c)
+        """Updates the Light Tile instantly without reloading the whole menu."""
+        # 1. Safety Check: Do we have the widgets saved?
+        if not hasattr(self, 'bulb_widgets') or not self.bulb_widgets:
+            return
+            
+        # 2. Get State from Backend
+        is_on = False
+        if hasattr(self.c, 'backend'):
+            is_on = self.c.backend.state.get("light_on", False)
+            
+        # 3. Define Colors
+        # Active = Amber Border, Inactive = Grey Border
+        border_col = "#FFD54F" if is_on else "#E0E0E0"
+        tile_bg = CLR_TILE_BG # Or "#FFFFFF" depending on your theme constant
+
+        # 4. Update the Tile Border
+        tile = self.bulb_widgets["tile"]
+        # We use the update_colors method we wrote in RoundedTile
+        tile.update_colors(tile_bg, border_col)
+
+        # 5. Update the Icon (Redraws the bulb)
+        icon = self.bulb_widgets["icon"]
+        icon.set_state(is_on, tile_bg)
 
     def toggle_light(self):
-        self.c.light_on = not self.c.light_on 
+        """Toggles backend state and refreshes UI instantly."""
+        # 1. Toggle in Backend
+        if hasattr(self.c, 'backend'):
+            self.c.backend.toggle_light()
+        
+        # 2. Update ONLY the bulb visuals (Fast & Smooth)
         self.update_bulb_visuals()
+
 
     def show_brightness(self):
         self.clear_content("Display")
@@ -1341,14 +1456,14 @@ class SettingsTray(tk.Frame):
                 # --- ICONS ---
                 if is_connected:
                     # Connected Checkmark
-                    lbl = tk.Label(r, text="✓", font=("Arial", 24, "bold"), fg="#4CAF50", bg="white")
+                    lbl = tk.Label(r, text="✓", font=("Arial", 24, "bold"), fg="#4CAF50", bg="white" , cursor="none")
                     lbl.pack(side="right", padx=10)
                     r.config(highlightbackground="#4CAF50", highlightthickness=2)
                     lbl.bind("<Button-1>", canvas.on_start); lbl.bind("<B1-Motion>", canvas.on_drag); lbl.bind("<ButtonRelease-1>", canvas.on_release)
                 else:
                     # NEW: Sleek "Add/Link" Button (Blue Plus Circle)
                     # We use a Label acting as a button for cleaner look
-                    btn = tk.Label(r, text="+", font=("Arial", 18, "bold"), fg=CLR_PRIMARY, bg="white", cursor="hand2")
+                    btn = tk.Label(r, text="+", font=("Arial", 18, "bold"), fg=CLR_PRIMARY, bg="white", cursor="none")
                     btn.pack(side="right", padx=15)
                     
                     # Bind Click (Connect) - Stops propagation so it doesn't trigger scroll
@@ -1402,17 +1517,94 @@ class SettingsTray(tk.Frame):
             for w in [f, l_i, l_t]: w.bind("<Button-1>", lambda e: self.close()) 
         mk_pwr("☾", "Sleep Mode"); mk_pwr("⟳", "Restart System"); mk_pwr("⏻", "Power Off")
 
+
+    
     def show_sensors(self):
-        self.clear_content("Sensor Data")
-        box = tk.Frame(self.content, bg="white", padx=20, pady=20, highlightbackground="#E0E0E0", highlightthickness=1)
-        box.pack(pady=20, fill="x")
-        def row(k, v):
-            r = tk.Frame(box, bg="white"); r.pack(fill="x", pady=8)
-            tk.Label(r, text=k, fg="#78909C", bg="white", font=("Arial", 12)).pack(side="left")
-            tk.Label(r, text=v, fg="#37474F", bg="white", font=("Arial", 12, "bold")).pack(side="right")
-        row("CPU Temp", "42°C"); row("Chamber", "24.5°C")
+        self.clear_content("Sensor Readings")
+        
+        # 1. Setup Canvas
+        container = tk.Frame(self.content, bg=CLR_TRAY)
+        container.pack(fill="both", expand=True)
+        
+        canvas = SmoothScroll(container, bg=CLR_TRAY, highlightthickness=0)
+        canvas.pack(side="left", fill="both", expand=True)
+        
+        inner = tk.Frame(canvas, bg=CLR_TRAY)
+        win = canvas.create_window((0, 0), window=inner, anchor="nw")
+        
+        # Resizing
+        def on_conf(e): canvas.itemconfig(win, width=e.width)
+        canvas.bind("<Configure>", on_conf)
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
 
+        # --- SECTION 1: Enclosure Environment ---
+        lbl_env = tk.Label(inner, text="Enclosure Environment", font=("Arial", 12, "bold"), fg=CLR_PRIMARY, bg=CLR_TRAY)
+        lbl_env.pack(anchor="w", pady=(10, 5), padx=20)
+        
+        grid1 = tk.Frame(inner, bg=CLR_TRAY)
+        grid1.pack(fill="x", padx=10)
 
+        def mk_card(parent, title, unit, icon, col, row, color="#546E7A"):
+            card = tk.Frame(parent, bg="white", padx=15, pady=15, highlightbackground="#E0E0E0", highlightthickness=1)
+            card.grid(row=row, column=col, sticky="ew", padx=5, pady=5)
+            parent.columnconfigure(col, weight=1)
+            
+            tk.Label(card, text=icon, font=("Arial", 20), fg=color, bg="white").pack(anchor="nw")
+            tk.Label(card, text=title, font=("Arial", 10), fg="#90A4AE", bg="white").pack(anchor="nw", pady=(5,0))
+            
+            lbl_val = tk.Label(card, text="--", font=("Arial", 18, "bold"), fg="#37474F", bg="white")
+            lbl_val.pack(anchor="nw")
+            
+            tk.Label(card, text=unit, font=("Arial", 14, "bold"), fg="#546E7A", bg="white").pack(anchor="ne")
+            return lbl_val
+
+        # CHANGED: Titles updated here
+        lbl_bme_temp = mk_card(grid1, "Enclosure Temp", "°C", "🌡", 0, 0, "#FF7043")
+        lbl_bme_hum  = mk_card(grid1, "Humidity", "%",  "💧", 1, 0, "#42A5F5")
+        lbl_adt_temp = mk_card(grid1, "Bed Temp", "°C", "📟", 0, 1, "#FFA726")
+        lbl_bme_pres = mk_card(grid1, "Pressure", "hPa", "⏲", 1, 1, "#78909C")
+
+        # --- SECTION 2: System Status ---
+        div = tk.Frame(inner, bg="#E0E0E0", height=1)
+        div.pack(fill="x", pady=20, padx=20)
+        
+        # CHANGED: Removed "(Raspberry Pi)" from text
+        lbl_sys = tk.Label(inner, text="System Status", font=("Arial", 12, "bold"), fg=CLR_PRIMARY, bg=CLR_TRAY)
+        lbl_sys.pack(anchor="w", pady=(0, 5), padx=20)
+        
+        grid2 = tk.Frame(inner, bg=CLR_TRAY)
+        grid2.pack(fill="x", padx=10)
+        
+        lbl_cpu_temp = mk_card(grid2, "CPU Temp", "°C", "🖥", 0, 0, "#EF5350")
+        lbl_cpu_load = mk_card(grid2, "CPU Load", "%", "⚡", 1, 0, "#66BB6A")
+        
+
+        # Apply Scroll Binding
+        canvas.bind_recursive(inner)
+
+        # Update Logic
+        def update_values():
+            if not inner.winfo_exists(): return
+            try:
+                if hasattr(self.c, 'backend'): data = self.c.backend.state.get("sensor_data", {})
+                else: data = self.c.state.get("sensor_data", {})
+
+                lbl_cpu_temp.config(text=f"{data.get('cpu_temp', 0)}")
+                lbl_cpu_load.config(text=f"{data.get('cpu_load', 0)}")
+        
+                
+                lbl_bme_temp.config(text=f"{data.get('bme_temp', 0):.1f}")
+                lbl_bme_hum.config(text=f"{data.get('bme_hum', 0):.0f}")
+                lbl_bme_pres.config(text=f"{data.get('bme_press', 0)}")
+                lbl_adt_temp.config(text=f"{data.get('adt_temp', 0):.1f}")
+            except: pass
+            self.after(1000, update_values)
+
+        inner.update_idletasks()
+        canvas.configure(scrollregion=canvas.bbox("all"))
+        update_values()
+    
+    
     def trigger_connect(self, ssid, password):
         self.clear_content("Connecting...")
         tk.Label(self.content, text=f"Joining {ssid}...", font=("Arial", 12), fg=CLR_PRIMARY, bg=CLR_TRAY).pack(pady=30)
@@ -1431,32 +1623,24 @@ class SettingsTray(tk.Frame):
         self.after(2000, self.show_main_menu)
 
     def clear_content(self, title):
-        # 1. Destroy old widgets
         for w in self.content.winfo_children(): w.destroy()
         
-        # 2. Navigation Bar
         nav = tk.Frame(self.content, bg=CLR_TRAY)
         nav.pack(fill="x", pady=(0, 20))
         
-        # 3. Back Button (Frame acting as button)
-        # cursor="none" removes the mouse pointer
+        # Frame cursor
         btn_frame = tk.Frame(nav, bg=CLR_TRAY, cursor="none") 
         btn_frame.pack(side="left")
         
-        btn_lbl = tk.Label(btn_frame, text="❮ Back", font=("Arial", 12, "bold"), fg=CLR_PRIMARY, bg=CLR_TRAY)
+        # Label cursor (This was likely missing)
+        btn_lbl = tk.Label(btn_frame, text="❮ Back", font=("Arial", 12, "bold"), fg=CLR_PRIMARY, bg=CLR_TRAY, cursor="none")
         btn_lbl.pack(padx=5, pady=10)
         
-        # --- PERMANENT FIX ---
-        # We use 'e=None' so this lambda works if triggered by an event (e is Event) 
-        # OR if triggered manually (e is None).
         go_back = lambda e=None: self.show_main_menu()
-        
         for w in [btn_frame, btn_lbl]: 
             w.bind("<Button-1>", go_back)
             
-        # 4. Title
         tk.Label(nav, text=title, font=("Arial", 14, "bold"), fg=CLR_TRAY_TEXT, bg=CLR_TRAY).pack(side="right")
-
 # --- FLOATING BUTTON (Independent Toplevel) ---
 class FloatingSettingsButton(tk.Toplevel):
     def __init__(self, parent, controller):
@@ -1507,20 +1691,20 @@ class CustomPopup(ModalOverlay):
         self.deiconify(); self.update_idletasks(); self.lift(); self.grab_set()
 
 class CustomConfirmPopup(ModalOverlay):
-    def __init__(self, parent, title, header, message, width=420, height=240):
+    def __init__(self, parent, title, header, message, width=420, height=240 ,color=CLR_DANGER ):
         super().__init__(parent); self.result = False
         cw, ch = width, height; cx = parent.winfo_width() / 2; cy = parent.winfo_height() / 2
         self.cv.create_rectangle(cx - cw/2 + 6, cy - ch/2 + 6, cx + cw/2 + 6, cy + ch/2 + 6, fill=CLR_SHADOW, outline="")
-        self.cv.create_rectangle(cx - cw/2, cy - ch/2, cx + cw/2, cy + ch/2, fill="white", outline=CLR_DANGER, width=2)
+        self.cv.create_rectangle(cx - cw/2, cy - ch/2, cx + cw/2, cy + ch/2, fill="white", outline=color, width=2)
         self.f = tk.Frame(self.cv, bg="white", width=cw-4, height=ch-4); self.f.pack_propagate(False); self.cv.create_window(cx, cy, window=self.f)
         head_box = tk.Frame(self.f, bg="white"); head_box.pack(pady=(15, 5))
-        tk.Label(head_box, text="?", font=("Arial", 40), fg=CLR_DANGER, bg="white").pack(side="top")
-        tk.Label(head_box, text=header, font=("Arial", 18, "bold"), fg=CLR_DANGER, bg="white").pack(side="top")
-        tk.Frame(self.f, height=2, bg=CLR_DANGER, width=300).pack(pady=5)
+        tk.Label(head_box, text=title, font=("Arial", 40), fg=color, bg="white").pack(side="top")
+        tk.Label(head_box, text=header, font=("Arial", 18, "bold"), fg=color, bg="white").pack(side="top")
+        tk.Frame(self.f, height=2, bg=color, width=300).pack(pady=5)
         tk.Label(self.f, text=message, font=("Arial", 12), bg="white", fg="#444", wraplength=cw-40).pack(pady=5)
         btn_f = tk.Frame(self.f, bg="white"); btn_f.pack(side="bottom", pady=20)
         RoundedButton(btn_f, text="CANCEL", command=self.on_cancel, width=120, height=50, bg_color="#9E9E9E", hover_color="#757575").pack(side="left", padx=15)
-        RoundedButton(btn_f, text="CONFIRM", command=self.on_confirm, width=120, height=50, bg_color=CLR_DANGER, hover_color=CLR_DANGER_HOVER).pack(side="left", padx=15)
+        RoundedButton(btn_f, text="CONFIRM", command=self.on_confirm, width=120, height=50, bg_color=color).pack(side="left", padx=15)
         self.deiconify(); self.lift(); self.grab_set(); self.wait_window()
         
     def on_confirm(self): self.result = True; self.destroy()
@@ -1877,13 +2061,13 @@ class Calibrate(tk.Frame):
         update_step(1)
 
     def confirm_exit(self):
-        c = CustomConfirmPopup(self.c, "Exit?", "EXIT CALIBRATION", "Unsaved changes will be lost.")
+        c = CustomConfirmPopup(self.c, "?", "EXIT CALIBRATION", "Unsaved changes will be lost.")
         if c.result:
             self.c.backend.set_calibration_mode(False, None)
             self.c.show_frame("Home")
 
     def confirm_save(self):
-        c = CustomConfirmPopup(self.c, "Save?", "SAVE OFFSETS", "Update calibration settings?")
+        c = CustomConfirmPopup(self.c, "?", "SAVE OFFSETS", "Update calibration settings?")
         if c.result:
             self.update() 
             self.c.backend.ui_send_gcode("OK_C")
@@ -1978,7 +2162,7 @@ class ProtocolList(tk.Frame):
             w.bind("<ButtonRelease-1>", on_click)
 
     def delete_file(self, filename):
-        c = CustomConfirmPopup(self.c, "Delete?", "DELETE FILE", f"Permanently delete\n{filename}?", width=480, height=280)
+        c = CustomConfirmPopup(self.c, "🗑️", "DELETE FILE", f"Permanently delete\n{filename}?")
         if c.result:
             try: os.remove(os.path.join(self.current_dir, filename)); self.refresh_files(self.current_dir)
             except Exception as e: print(f"Error deleting file: {e}")
@@ -2000,6 +2184,25 @@ class ProtocolList(tk.Frame):
         if not self.c.backend.state.get("is_calibrated", False):
             popup = CustomPopup(self.c, "Required", "CALIBRATION NEEDED", "You must calibrate the system before running a protocol.", CLR_DANGER, "🛑")
             self.c.wait_window(popup); return
+        # --- 2. LID SAFETY CHECK (NEW) ---
+        is_lid_open = self.c.backend.state.get("lid_open", False)
+        
+        if is_lid_open:
+            # Define what happens if they click "YES"
+            def run_anyway():
+                self.c.backend.ui_load_and_run(filename)
+                self.show_run_screen()
+          
+            # Show the Confirmation Popup
+            # Arguments: parent, title, message, yes_callback
+            c=CustomConfirmPopup(self.c, 
+                         "⚠️", 
+                         "LID OPEN",
+                         "The enclosure lid is open.\nDo you want to start anyway?",420,280,CLR_WARNING)
+            
+            if not c.result:
+                return;
+            
         if not self.selected_card: return
         fname = self.c.selected_file.get(); self.c.backend.ui_load_and_run(fname); self.c.show_frame("Running")  
 
@@ -2030,7 +2233,7 @@ class Running(tk.Frame):
         RoundedButton(footer, text="STOP", command=self.cancel_run, width=150, height=55, bg_color=CLR_DANGER, hover_color=CLR_DANGER_HOVER).pack(side="right")
 
     def cancel_run(self):
-        confirm = CustomConfirmPopup(self.c, "Stop Confirmation", "STOP PROTOCOL", "Are you sure you want to abort?")
+        confirm = CustomConfirmPopup(self.c, "⏹️", "STOP PROTOCOL", "Are you sure you want to abort?")
         if confirm.result: self.c.backend.ui_stop()
 
     def update_view(self, state):
