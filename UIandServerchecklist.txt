@@ -1,13 +1,20 @@
+#v1.4
 check in both ui and server sync
-download
-pause ui/remote
-resume ui/remote 
-stop pop up in case of remote and logs proper
+-Download
+-pause ui/remote
+-resume ui/remote 
+-stop pop up in case of remote and logs proper
+-System Blocking and Sync
 
 check in srever
-download 
-calibration 
-logs
+-Download 
+-calibration 
+-logs
+-Sensor 
+-Lid popup
+-Calibration popup
+-status
+-protocol Setup 
 
 check in ui
 Calibrtation Screen
@@ -17,11 +24,15 @@ Calibrtation Screen
 - steps radio
 - succesfully saved offeset popup
 - Error during calibration 
+- Blocking popup on server and pi  
 
 Protocol list Screen
 - test and Rececnt protocol tab
 - scrollability 
 - delete option in recent protocol with confirmation popup
+- calibration needed popup
+- Lid open popup
+- Protcol Setup popup
 
 Runnig Screen
 - Downloading and starte running the remote protocol
@@ -29,4 +40,41 @@ Runnig Screen
 - Stopped by Physical Button , UI , remote
 - check labelslike currentling status and description 
 - Stop confirmation, success , error popup
+- Only opens after calibration 
+- Shows Marquee filename (Scrolling tex)
+- Sensor status bar
+- Fan Control
+- progrss bar color change on Pause or Error
 
+setting tray
+- Wifi
+    -- Wifi scan 
+    -- Wifi name Marquee text 
+    -- Wifi Signal Strength
+    -- wifi Connected 
+    -- Wifi popup for connection
+    -- Keyboard (animation and no redraw on Shift key)
+    -- smooth scroll 
+- Brightness
+    -- Brightness slider conainer with sunIcon color + animation
+    -- System tray outline and icon reflected as the setting 
+-Light Toggle bulbIcon 
+-Sensor 
+    --Smooth Scroll
+    --Enclouser Environment
+        --- Enclosure Temp
+        --- Humidity
+        --- Bed Temp 
+        --- Pressure
+    -- System Status 
+       --- CPU temp 
+       --- CPU Load
+-Lid Open Toggle the icon and BG on the Input
+-Stack 
+    -- Info
+        ---Show popup of the version detail
+    -- Power 
+        --- Sleep
+        --- restart
+        --- shutdown       
+   
