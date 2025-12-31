@@ -1,4 +1,4 @@
-
+#v1.4 Wifi manager thereading + (BME + ADT75) basic Thermal control loop + Light controller + Lid switch + PWM 1 FAN & 1 HEATER + Brightness control + Calibration logging 
 import requests
 import serial
 import time
@@ -41,6 +41,59 @@ DIR_CALIB_LOGS = os.path.join(LOG_ROOT, "calibration_logs")
 for d in [DIR_RECENT, DIR_TEST, LOG_ROOT, DIR_PROTO_LOGS, DIR_CALIB_LOGS]: 
     os.makedirs(d, exist_ok=True)
 
+# --- 1. PWM DEVICE WRAPPER ---
+class PWMDevice:
+    def __init__(self, pin, freq=100):
+        self.pin = pin
+        self.freq = freq
+        self.pwm = None
+        try:
+            GPIO.setup(self.pin, GPIO.OUT)
+            self.pwm = GPIO.PWM(self.pin, self.freq)
+            self.pwm.start(0)
+        except: pass # Sim mode
+
+    def set_duty(self, duty):
+        # Clamp 0-100
+        val = max(0.0, min(100.0, float(duty)))
+        if self.pwm: self.pwm.ChangeDutyCycle(val)
+
+# --- 2. PID CONTROLLER ---
+class PIDController:
+    def __init__(self, kp=2.0, ki=0.1, kd=0.5):
+        self.kp = kp; self.ki = ki; self.kd = kd
+        self.target = 0.0
+        self.prev_error = 0.0
+        self.integral = 0.0
+        self.last_time = time.time()
+        
+    def update(self, current_temp):
+        now = time.time()
+        dt = now - self.last_time
+        if dt <= 0: return 0
+        
+        error = self.target - current_temp
+        
+        # Proportional
+        p = self.kp * error
+        
+        # Integral (with anti-windup)
+        self.integral += error * dt
+        self.integral = max(-50, min(50, self.integral)) # Clamp I term
+        i = self.ki * self.integral
+        
+        # Derivative
+        d = self.kd * ((error - self.prev_error) / dt)
+        
+        self.prev_error = error
+        self.last_time = now
+        
+        # Output (-100 to 100)
+        # Positive = Heating required
+        # Negative = Cooling required
+        return max(-100, min(100, p + i + d))
+    
+    
 # --- 1. SENSOR MANAGER CLASS ---
 class SensorManager:
     def __init__(self):
@@ -145,20 +198,43 @@ class RobotClient:
             "calibration_active": False,
             "calibration_source": None,
             "calib_status": "Idle", 
-            "is_calibrated": False
+            "is_calibrated": False,
+           
+            #lid and light and sensor 
+            "lid_open": False,    # Lid Switch State    
+            "light_on": False,    # WS2812 Light State
+            "sensor_data": {},    # Latest Sensor Readings
+            
+            # NEW TEMP STATE
+            "target_temp": 0,      # User Setpoint
+            "fan_mode": "Manual",  # "Auto" or "Manual"
+            "fan_manual_val": 0,   # User Slider %
+            "heater_duty": 0,
+            "fan_duty": 0,
+            
         }
+        # --- INIT PWM DEVICES ---
+        self.PIN_HEATER = 12
+        self.PIN_FAN = 13
+        self.heater = PWMDevice(self.PIN_HEATER)
+        self.fan = PWMDevice(self.PIN_FAN)
+        
+        # --- INIT PID ---
+        self.pid = PIDController(kp=5.0, ki=0.05, kd=1.0) # Tune these values!
+        
+        # Lid
         self.PIN_LID_SWITCH = 22 # Change to your actual pin
         GPIO.setup(self.PIN_LID_SWITCH, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         
         # Add to state
-        self.state["lid_open"] = False
+        # self.state["lid_open"] = False
         
         self.sensors = SensorManager()
         self.lights = LightController(pin=18, num_pixels=12) # Adjust pixel count here
         
         # Add to State
-        self.state["light_on"] = False
-        self.state["sensor_data"] = {}
+        # self.state["light_on"] = False
+        # self.state["sensor_data"] = {}
         
         self.command_queue = queue.Queue()
         self.start_time = None; self.smoothed_seconds = 0
@@ -194,6 +270,52 @@ class RobotClient:
         
         # ... keep your existing socket/server connection code here ...
         print(f"DEBUG: Backlight Path: {self.backlight_path}")
+    # --- NEW: THERMAL CONTROL LOOP ---
+    def update_thermal_control(self):
+        # 1. Get Current Temp (Enclosure)
+        # Using "bme_temp" as source. Fallback to 0.
+        sensors = self.sensors.get_all() # Assuming you have SensorManager updated
+        current_temp = sensors.get("bme_temp", 0)
+        target = self.state["target_temp"]
+
+        # SAFETY: If temp sensor fails (0.0) or target is 0, TURN OFF
+        if current_temp <= 0.1 or target <= 0:
+            self.heater.set_duty(0)
+            self.fan.set_duty(self.state["fan_manual_val"] if self.state["fan_mode"] == "Manual" else 0)
+            self.state["heater_duty"] = 0
+            return
+
+        # 2. Update PID
+        self.pid.target = target
+        output = self.pid.update(current_temp)
+
+        # 3. Apply Logic based on Mode
+        heater_val = 0
+        fan_val = 0
+
+        if output > 0:
+            # HEATING NEEDED
+            heater_val = output # 0 to 100
+            fan_val = 0 # Off (or min airflow)
+        else:
+            # COOLING NEEDED (Overshoot)
+            heater_val = 0
+            fan_val = abs(output) # 0 to 100
+
+        # 4. Override Fan if Manual
+        if self.state["fan_mode"] == "Manual":
+            fan_val = self.state["fan_manual_val"]
+            # In Manual Fan mode, PID only controls Heater (0-100)
+            # If PID wanted negative (cooling), heater just stays 0.
+
+        # 5. Write to Hardware
+        self.heater.set_duty(heater_val)
+        self.fan.set_duty(fan_val)
+        
+        # 6. Update State for UI
+        self.state["heater_duty"] = int(heater_val)
+        self.state["fan_duty"] = int(fan_val)
+        self.state["sensor_data"] = sensors # Ensure latest sensors stored
         
     def toggle_light(self):
         """Toggles WS2812 LEDs."""
@@ -287,16 +409,37 @@ class RobotClient:
             return []   
     
     def connect_wifi(self, ssid, password):
-        print(f"Connecting to {ssid}...")
+        print(f"📡 Attempting to connect to: {ssid}...", flush=True)
+        
         try:
+            # 1. Cleanup: Try to delete existing connection profile for this SSID first
+            # This prevents "Profile already exists" errors or conflicts
             subprocess.run(
-                ["nmcli", "dev", "wifi", "connect", ssid, "password", password],
-                check=True
+                ["sudo", "nmcli", "connection", "delete", ssid],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
             )
-            return True
-        except subprocess.CalledProcessError:
-            return False
-    
+            
+            # 2. Connect: Run with SUDO and capture output for debugging
+            # Using 'capture_output=True' allows us to see the error message if it fails
+            result = subprocess.run(
+                ["sudo", "nmcli", "dev", "wifi", "connect", ssid, "password", password],
+                capture_output=True,
+                text=True
+            )
+            
+            # 3. Check Result
+            if result.returncode == 0:
+                print(f"✅ Successfully connected to {ssid}")
+                return True
+            else:
+                # Print the actual error from nmcli
+                print(f"❌ Connection Failed. Error output:\n{result.stderr}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ WiFi System Error: {e}")
+            return False        
     def _find_backlight_path(self):
         """Auto-detects the backlight controller path."""
         # Common locations for Raspberry Pi DSI / GPIO displays
@@ -597,6 +740,7 @@ class RobotClient:
         waiting_for_response = False
         
         while True:
+            self.update_thermal_control()
             self.calculate_estimate()
             if time.time() - last_sync > 0.5: self.sync_with_server(); last_sync = time.time()
             
@@ -651,6 +795,12 @@ class RobotClient:
                             self.state["status"] = "Running"
                             self.state["pause_reason"] = None
                             GPIO.output(self.PIN_PAUSE, 0)
+                            
+                    elif cmd_type == "CONNECT_WIFI":
+                        ssid, pw = data
+                        # Run in a thread so the loop doesn't freeze
+                        threading.Thread(target=self.connect_wifi, args=(ssid, pw), daemon=True).start()        
+                    
             except: pass
 
             if self.ser and self.ser.in_waiting:
@@ -704,6 +854,9 @@ class RobotClient:
 
             if self.is_running and not self.is_paused and self.protocol_steps:
                 if self.ptr < len(self.protocol_steps):
+                    # 1. GET STEP DATA
+                    step = self.protocol_steps[self.ptr]
+
                     if not waiting_for_response:
                         step = self.protocol_steps[self.ptr]
                         self.state["current_line"] = step["cmd"]; self.state["current_desc"] = step["desc"]
