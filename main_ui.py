@@ -1,5 +1,6 @@
+#v1.4 ProtocolSetupPopup + Running Screen updated (Fan and Sensor Status bar) + Lid open Close + Enhanced Widgets
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk
 import os
 import backend 
 from datetime import datetime
@@ -96,7 +97,6 @@ class RoundedButton(tk.Canvas):
         original = self.bg_color
         self.itemconfig(self.rect_id, fill=color)
         self.after(150, lambda: self.itemconfig(self.rect_id, fill=original))
-
 # --- SHADOW CARD ---
 class ShadowCard(tk.Frame):
     def __init__(self, parent, width=200, height=200, bg="white", border_color=None, padding=10):
@@ -160,13 +160,20 @@ class HourglassSpinner(tk.Canvas):
         self.after(50, self.animate)
 
 
-# --- PROGRESS BAR ---
+# --- UPDATED :  Added set_color ---
 class ModernProgressBar(tk.Canvas):
     def __init__(self, parent, width=600, height=30, bg_color=CLR_PROG_BG, fill_color=CLR_SUCCESS):
         super().__init__(parent, width=width, height=height, bg=CLR_CARD, highlightthickness=0)
-        self.w = width; self.h = height; self.fill_color = fill_color; self.bg_color = bg_color
-        self.current_pct = 0.0; self.target_pct = 0.0
+        self.w = width
+        self.h = height
+        self.fill_color = fill_color
+        self.bg_color = bg_color
+        self.current_pct = 0.0
+        self.target_pct = 0.0
+        
+        # Draw Background
         self.create_rounded_rect(0, 0, width, height, radius=height, fill=bg_color, tags="bg")
+        # Draw Fill (Initial empty)
         self.fill_id = self.create_rounded_rect(0, 0, 0, height, radius=height, fill=fill_color, tags="fill")
 
     def create_rounded_rect(self, x1, y1, x2, y2, radius=25, **kwargs):
@@ -174,18 +181,38 @@ class ModernProgressBar(tk.Canvas):
         return self.create_polygon(points, **kwargs, smooth=True)
 
     def set_progress(self, pct):
-        self.target_pct = max(0, min(100, pct)); self.animate()
+        self.target_pct = max(0, min(100, pct))
+        self.animate()
+
+    def set_color(self, color):
+        """Updates color and forces a redraw immediately."""
+        if self.fill_color != color:
+            self.fill_color = color
+            self.redraw_fill()
+
+    def redraw_fill(self):
+        """Draws the bar with the current width and color."""
+        self.delete("fill")
+        raw_width = (self.current_pct / 100) * self.w
+        # Ensure min width matches height for perfect roundness, unless 0
+        new_width = max(self.h, raw_width) if self.current_pct > 0.5 else 0
+        
+        if new_width > 0:
+            self.create_rounded_rect(0, 0, new_width, self.h, radius=self.h, fill=self.fill_color, tags="fill")
 
     def animate(self):
         diff = self.target_pct - self.current_pct
-        if abs(diff) < 0.5: self.current_pct = self.target_pct
-        else: self.current_pct += diff * 0.1 
-        raw_width = (self.current_pct / 100) * self.w
-        new_width = max(self.h, raw_width) if self.current_pct > 0.5 else 0
-        self.delete("fill")
-        if new_width > 0: self.create_rounded_rect(0, 0, new_width, self.h, radius=self.h, fill=self.fill_color, tags="fill")
-        if self.current_pct != self.target_pct: self.after(20, self.animate)
-            
+        if abs(diff) < 0.5: 
+            self.current_pct = self.target_pct
+        else: 
+            self.current_pct += diff * 0.1 
+        
+        self.redraw_fill()
+        
+        if self.current_pct != self.target_pct: 
+            self.after(20, self.animate)
+    
+    
 # --- SCROLLABLE FRAME ---
 class ScrollableFrame(tk.Frame):
     def __init__(self, container, *args, **kwargs):
@@ -251,7 +278,6 @@ class ModalOverlay(tk.Toplevel):
 
 
 # --- CUSTOM BRIGHTNESS WIDGET ---
-# --- CUSTOM BRIGHTNESS WIDGET (Clean & Modern) ---
 class BrightnessControl(tk.Canvas):
     def __init__(self, parent, width=180, height=280, initial=50, command=None, bg_color="#F7F9FC"):
         super().__init__(parent, width=width, height=height, bg=bg_color, highlightthickness=0)
@@ -322,8 +348,8 @@ class BrightnessControl(tk.Canvas):
 
     def on_touch(self, e): self.update_from_y(e.y)
 
-# --- CUSTOM SUN ICON (Colorful & Scalable) ---
- #   --- DYNAMIC SUN ICON (Reflects Brightness) ---
+
+#   --- DYNAMIC SUN ICON (Reflects Brightness) ---
 class SunIcon(tk.Canvas):
     def __init__(self, parent, size=60, bg_color="#FFFFFF", brightness=100):
         super().__init__(parent, width=size, height=size, bg=bg_color, highlightthickness=0)
@@ -419,7 +445,7 @@ class BulbIcon(tk.Canvas):
         self.create_line(cx-5, cy+10, cx+5, cy+10, fill="#90A4AE", width=1)
         # Tip
         self.create_oval(cx-2, cy+14, cx+2, cy+16, fill="#78909C", outline="")
-
+# --- CUSTOM DOOR ICON (Dynamic State) ---
 class DoorIcon(tk.Canvas):
     def __init__(self, parent, size=60, bg_color="#FFFFFF"):
         super().__init__(parent, width=size, height=size, bg=bg_color, highlightthickness=0)
@@ -455,7 +481,7 @@ class DoorIcon(tk.Canvas):
             
             # Handle
             self.create_oval(w-22, cy-4, w-14, cy+4, fill="white", outline="#2E7D32")
-# --- CUSTOM WIFI ICON (Canvas Drawing - Guaranteed to Show) ---
+
 # --- CUSTOM WIFI ICON (Dynamic Color) ---
 class WiFiIcon(tk.Canvas):
     def __init__(self, parent, size=60, bg_color="#FFFFFF", is_connected=False):
@@ -488,7 +514,6 @@ class WiFiIcon(tk.Canvas):
         self.create_arc(cx-28, cy-28, cx+28, cy+28, start=45, extent=90, style="arc", outline=col, width=width_val)
 
 
-# --- CUSTOM KEYBOARD BUTTON (Responsive Canvas) ---
 # --- CUSTOM KEYBOARD BUTTON (Responsive Canvas) ---
 class KeyboardKey(tk.Canvas):
     def __init__(self, parent, text, width, height, command=None, bg_color="#FFFFFF", fg_color="#000000", is_special=False):
@@ -542,7 +567,6 @@ class KeyboardKey(tk.Canvas):
 
 
 # --- FULL WIDTH RESPONSIVE KEYBOARD ---
-# --- CUSTOM KEYBOARD BUTTON (Unchanged) ---
 class KeyboardKey(tk.Canvas):
     def __init__(self, parent, text, width, height, command=None, bg_color="#FFFFFF", fg_color="#000000", is_special=False):
         super().__init__(parent, width=width, height=height, bg="#D1D5DB", highlightthickness=0)
@@ -844,6 +868,7 @@ class WifiPasswordPopup(tk.Toplevel):
         if self.kb_win: self.kb_win.destroy()
         self.destroy()
         self.on_connect(self.ssid, pwd)
+
 #  --- SMOOTH SCROLL (With Noise Filtering) ---
 class SmoothScroll(tk.Canvas):
     def __init__(self, parent, **kwargs):
@@ -910,7 +935,6 @@ class SmoothScroll(tk.Canvas):
         self.scrolling = False
         self.history = []
         
-
 class RoundedTile(tk.Canvas):
     def __init__(self, parent, width=125, height=110, bg_color="#FFFFFF", border_color="#E0E0E0", command=None):
         super().__init__(parent, width=width, height=height, bg=CLR_TRAY, highlightthickness=0, cursor="none")
@@ -1088,9 +1112,8 @@ class ModernBrightness(tk.Canvas):
         if self.command: self.command(self.val)
     
     def on_touch(self, e): self.update_from_y(e.y)
-# --- UPDATED SETTINGS TRAY ---
-# --- SETTINGS TRAY (Updated Focus & v1.3) ---
-# --- ROBUST MARQUEE (Crash-Proof) ---
+
+# --- UPDATED : MARQUEE LABEL (For Long Text Scrolling) ---
 class MarqueeLabel(tk.Canvas):
     def __init__(self, parent, text, width, height, font=("Arial", 14, "bold"), fg="#37474F", bg="white"):
         super().__init__(parent, width=width, height=height, bg=bg, highlightthickness=0)
@@ -1107,10 +1130,26 @@ class MarqueeLabel(tk.Canvas):
         self.text_width = 0
         self.offset = 0
         
-        # Bind resize event safely
         self.bind("<Configure>", self.on_resize)
-        # Stop animation on destroy
         self.bind("<Destroy>", self.on_destroy)
+
+    def set_text(self, new_text):
+        """Updates the text dynamically and resets animation if needed."""
+        if self.text == new_text: return
+        self.text = new_text
+        self.itemconfig(self.text_id, text=new_text)
+        self.offset = 0
+        self.coords(self.text_id, 0, int(self["height"])/2)
+        
+        # Re-check width immediately if possible
+        if self.winfo_exists():
+            bbox = self.bbox(self.text_id)
+            if bbox:
+                self.text_width = bbox[2] - bbox[0]
+                self.animating = False # Stop current
+                if self.text_width > self.canvas_width:
+                    self.animating = True
+                    self.animate()
 
     def on_destroy(self, event):
         self.animating = False
@@ -1126,27 +1165,15 @@ class MarqueeLabel(tk.Canvas):
                 self.animate()
 
     def animate(self):
-        # 1. CRITICAL SAFETY CHECK: Stop if widget is deleted
-        if not self.winfo_exists() or not self.animating: 
-            return
-
+        if not self.winfo_exists() or not self.animating: return
         try:
             self.offset -= self.step
-            
-            # Reset Logic
             if abs(self.offset) > (self.text_width - self.canvas_width + self.margin):
                 self.after(1500, self.reset)
                 return
-
-            # Move Text
             self.coords(self.text_id, self.offset, int(self["height"])/2)
-            
-            # Loop
             self.after(self.fps, self.animate)
-            
-        except (tk.TclError, Exception):
-            # If any error happens (e.g. window closed mid-animation), stop loop
-            self.animating = False
+        except: self.animating = False
 
     def reset(self):
         if not self.winfo_exists() or not self.animating: return
@@ -1154,11 +1181,9 @@ class MarqueeLabel(tk.Canvas):
             self.offset = 0
             self.coords(self.text_id, 0, int(self["height"])/2)
             self.after(1000, self.animate)
-        except:
-            self.animating = False
-
-
-
+        except: self.animating = False
+        
+    
 class SettingsTray(tk.Frame):
     def __init__(self, parent_root, controller, floating_btn):
         super().__init__(parent_root)
@@ -2075,6 +2100,329 @@ class Calibrate(tk.Frame):
             self.wait_window(popup)
             self.c.show_frame("Home")
 
+# --- UPDATE: FOR Fan Mode SEGMENTED TOGGLE SWITCH (Auto | Manual) ---
+class ToggleSwitch(tk.Canvas):
+    def __init__(self, parent, options=["Auto", "Manual"], command=None, width=160, height=40):
+        super().__init__(parent, width=width, height=height, bg="white", highlightthickness=0)
+        self.options = options
+        self.command = command
+        self.w, self.h = width, height
+        self.selected_idx = 0 # 0 = Left, 1 = Right
+        
+        self.draw()
+        self.bind("<Button-1>", self.toggle)
+
+    def set_value(self, val):
+        if val in self.options:
+            self.selected_idx = self.options.index(val)
+            self.draw()
+
+    def get_value(self):
+        return self.options[self.selected_idx]
+
+    def toggle(self, event=None):
+        self.selected_idx = 1 - self.selected_idx
+        self.draw()
+        if self.command: self.command(self.get_value())
+
+    def draw(self):
+        self.delete("all")
+        # Background Pill (Gray)
+        self.create_rectangle(2, 2, self.w-2, self.h-2, fill="#ECEFF1", outline="#CFD8DC", width=1, tags="bg")
+        
+        # Active Pill (Blue) - Moves Left/Right
+        padding = 4
+        half_w = (self.w / 2) - padding
+        if self.selected_idx == 0:
+            x1, x2 = padding, (self.w/2) - (padding/2)
+            col = CLR_SUCCESS # Green for Auto
+        else:
+            x1, x2 = (self.w/2) + (padding/2), self.w - padding
+            col = CLR_PRIMARY # Blue for Manual
+            
+        self.create_rectangle(x1, padding, x2, self.h-padding, fill=col, outline="", tags="active")
+        
+        # Text Labels
+        # Left Text
+        fg0 = "white" if self.selected_idx == 0 else "#90A4AE"
+        self.create_text(self.w/4, self.h/2, text=self.options[0], font=("Arial", 11, "bold"), fill=fg0)
+        
+        # Right Text
+        fg1 = "white" if self.selected_idx == 1 else "#90A4AE"
+        self.create_text(self.w*0.75, self.h/2, text=self.options[1], font=("Arial", 11, "bold"), fill=fg1)
+
+# --- UPDAtE: FAN SLIDER (Supports Auto/Read-Only) ---
+class AnimatedFanSlider(tk.Canvas):
+    def __init__(self, parent, width=300, height=50, min_val=0, max_val=100, command=None, bg_color=CLR_BG):
+        super().__init__(parent, width=width, height=height, bg=bg_color, highlightthickness=0)
+        self.w, self.h = width, height
+        self.min_val, self.max_val = min_val, max_val
+        self.value = 0
+        self.command = command
+        self.angle = 0
+        self.dragging = False
+        self.read_only = False # New flag
+        self.label_text = "FAN SPEED"
+        
+        self.draw()
+        self.bind("<Button-1>", self.on_click)
+        self.bind("<B1-Motion>", self.on_drag)
+        self.bind("<ButtonRelease-1>", self.on_release)
+        self.animate()
+
+    def set_value(self, val):
+        self.value = max(self.min_val, min(self.max_val, val))
+        self.draw()
+        
+    def set_read_only(self, is_read_only):
+        self.read_only = is_read_only
+        self.label_text = "FAN (AUTO)" if is_read_only else "FAN SPEED"
+        self.draw()
+
+    def draw(self):
+        self.delete("all")
+        r = 25 
+        
+        # 1. Container Background
+        self.create_rounded_rect(0, 0, self.w-1, self.h-1, r, fill="white", outline="black", width=1)
+        
+        # 2. Active Fill
+        # Auto mode uses a slightly different color (Greenish) to indicate system control, or keep blue.
+        # Let's keep Blue for consistency, maybe lighter if Auto.
+        fill_col = "#C8E6C9" if self.read_only else "#E3F2FD" 
+        
+        max_fill_w = self.w - 2
+        current_fill_w = (self.value / 100) * max_fill_w
+        
+        if current_fill_w > 0:
+            self.create_rounded_rect(1, 1, 1 + current_fill_w, self.h-1, r, fill=fill_col, outline="")
+            
+        # 3. Fan Icon
+        icon_col = CLR_SUCCESS if self.read_only else CLR_PRIMARY
+        self.draw_fan(30, self.h/2, 18, icon_col)
+        
+        # 4. Percentage Text
+        text_col = CLR_SUCCESS if self.read_only else CLR_PRIMARY
+        self.create_text(self.w - 40, self.h/2, text=f"{int(self.value)}%", font=("Arial", 14, "bold"), fill=text_col)
+        
+        # 5. Label
+        self.create_text(self.w/2, self.h/2, text=self.label_text, font=("Arial", 9, "bold"), fill="#90A4AE")
+
+    def create_rounded_rect(self, x1, y1, x2, y2, r, **kwargs):
+        points = [x1+r, y1, x1+r, y1, x2-r, y1, x2-r, y1, x2, y1, x2, y1+r, x2, y1+r, x2, y2-r, x2, y2-r, x2, y2, x2-r, y2, x2-r, y2, x1+r, y2, x1+r, y2, x1, y2, x1, y2-r, x1, y2-r, x1, y1+r, x1, y1+r, x1, y1]
+        return self.create_polygon(points, **kwargs, smooth=True)
+
+    def draw_fan(self, cx, cy, r, color):
+        for i in range(0, 360, 90):
+            rad = math.radians(self.angle + i)
+            x2 = cx + (r * math.cos(rad))
+            y2 = cy + (r * math.sin(rad))
+            self.create_line(cx, cy, x2, y2, fill=color, width=3, capstyle="round")
+        self.create_oval(cx-4, cy-4, cx+4, cy+4, fill="white", outline=color)
+
+    def on_click(self, e):
+        if self.read_only: return # Ignore clicks in Auto mode
+        self.dragging = True; self.update_from_event(e)
+
+    def on_drag(self, e):
+        if self.read_only: return
+        if self.dragging: self.update_from_event(e)
+
+    def on_release(self, e):
+        if self.read_only: return
+        self.dragging = False; 
+        if self.command: self.command(self.value)
+
+    def update_from_event(self, e):
+        pct = max(0, min(1, e.x / self.w)); self.value = int(pct * 100); self.draw()
+
+    def animate(self):
+        if self.value > 0:
+            self.angle = (self.angle + (5 + self.value*0.5)) % 360
+            self.draw()
+        self.after(50, self.animate)
+
+ # --- THERMAL SETUP POPUP (With Borders) ---
+
+# --- UPDAtE: SELECTABLE BUTTON (Inherits RoundedButton ) ---
+class SelectableButton(RoundedButton):
+    def __init__(self, parent, text, width=120, height=50, font=("Arial", 12, "bold"), 
+                 bg_color="#FAFAFA", fg_color="black", border_color="#E0E0E0", border_width=1, command=None):
+        
+        # 1. Call the Original RoundedButton __init__ correctly
+        # Signature: parent, text, command, width, height, radius, bg, hover, fg, font
+        super().__init__(parent, text, command, width=width, height=height, 
+                         bg_color=bg_color, hover_color=bg_color, # Disable hover shift for inputs
+                         fg_color=fg_color, font=font)
+        
+        # 2. Add Border Logic (Post-Init)
+        self.border_color = border_color
+        self.border_width = border_width
+        
+        # Apply the border to the rectangle created by the parent class
+        self.itemconfig(self.rect_id, outline=self.border_color, width=self.border_width)
+
+    def set_border(self, color, width):
+        """Updates the border dynamically."""
+        self.border_color = color
+        self.border_width = width
+        self.itemconfig(self.rect_id, outline=color, width=width)
+
+    def set_color(self, bg, fg):
+        """Overrides parent set_color to handle text color (fg) too."""
+        self.bg_color = bg
+        self.hover_color = bg # Keep hover same as bg for inputs
+        self.itemconfig(self.rect_id, fill=bg)
+        self.itemconfig(self.text_id, fill=fg)
+
+# --- UPDATE: PROTOCOL SETUP POPUP (Target Temp + FAN MODE AND SPEED) ---
+class ProtocolSetupPopup(ModalOverlay):
+    def __init__(self, parent, backend):
+        super().__init__(parent)
+        self.backend = backend
+        self.result = False
+        
+        # State
+        self.temp_val = str(backend.state.get("target_temp", 25))
+        self.fan_val = str(backend.state.get("fan_manual_val", 0))
+        self.mode = backend.state.get("fan_mode", "Manual")
+        self.active_field = "temp" 
+
+        # Layout
+        cw, ch = 540, 420 
+        cx, cy = parent.winfo_width()/2, parent.winfo_height()/2
+        self.cv.create_rectangle(cx-cw/2, cy-ch/2, cx+cw/2, cy+ch/2, fill="white", outline=CLR_PRIMARY, width=3)
+        self.f = tk.Frame(self.cv, bg="white", width=cw-6, height=ch-6); self.f.pack_propagate(False)
+        self.cv.create_window(cx, cy, window=self.f)
+        
+        tk.Label(self.f, text="PROTOCOL SETUP", font=("Arial", 16, "bold"), bg="white", fg=CLR_PRIMARY).pack(pady=(15, 5))
+
+        # Main Grid
+        content = tk.Frame(self.f, bg="white"); content.pack(fill="both", expand=True, padx=20, pady=5)
+        left_col = tk.Frame(content, bg="white"); left_col.pack(side="left", fill="both", expand=True, padx=(0, 10))
+        
+        # --- INPUT 1: TEMP ---
+        self.lbl_temp_info = tk.Label(left_col, text="TARGET TEMP (15-35°C)", font=("Arial", 11, "bold"), fg="#90A4AE", bg="white")
+        self.lbl_temp_info.pack(anchor="w", pady=(5, 2))
+        
+        self.btn_temp = SelectableButton(left_col, text=f"{self.temp_val}", width=210, height=65, 
+                                         font=("Arial", 26, "bold"), 
+                                         bg_color="#FAFAFA", fg_color="black", 
+                                         border_color="#E0E0E0", border_width=1,
+                                         command=lambda: self.select_field("temp"))
+        self.btn_temp.pack(anchor="w")
+
+        # --- INPUT 2: FAN ---
+        self.lbl_fan_info = tk.Label(left_col, text="FAN SPEED (0-100%)", font=("Arial", 11, "bold"), fg="#90A4AE", bg="white")
+        self.btn_fan = SelectableButton(left_col, text=f"{self.fan_val}", width=210, height=65, 
+                                        font=("Arial", 26, "bold"),
+                                        bg_color="#FAFAFA", fg_color="black",
+                                        border_color="#E0E0E0", border_width=1,
+                                        command=lambda: self.select_field("fan"))
+        # (Packed later)
+
+        # --- MODE TOGGLE ---
+        tk.Label(left_col, text="FAN MODE", font=("Arial", 11, "bold"), fg="#90A4AE", bg="white").pack(anchor="w", pady=(15, 2))
+        self.toggle_sw = ToggleSwitch(left_col, command=self.on_mode_change)
+        self.toggle_sw.set_value(self.mode)
+        self.toggle_sw.pack(anchor="w")
+
+        # --- KEYPAD ---
+        right_col = tk.Frame(content, bg="white"); right_col.pack(side="right")
+        keys = ['1','2','3', '4','5','6', '7','8','9', '.', '0', '⌫']
+        r, c = 0, 0
+        for k in keys:
+            cmd = lambda x=k: self.on_key(x)
+            tk.Button(right_col, text=k, font=("Arial", 16, "bold"), width=4, height=2, 
+                      bg="#FAFAFA", activebackground="#E3F2FD", relief="flat", command=cmd).grid(row=r, column=c, padx=3, pady=3)
+            c += 1; 
+            if c > 2: c=0; r+=1
+
+        bot = tk.Frame(self.f, bg="white"); bot.pack(side="bottom", fill="x", pady=15, padx=30)
+        RoundedButton(bot, text="CANCEL", command=self.destroy, width=120, height=50, bg_color="#CFD8DC").pack(side="left")
+        self.btn_start = RoundedButton(bot, text="START", command=self.on_confirm, width=120, height=50, bg_color=CLR_SUCCESS)
+        self.btn_start.pack(side="right")
+        
+        self.update_visibility()
+        self.select_field("temp") 
+        self.deiconify(); self.lift(); self.grab_set(); self.wait_window()
+
+    def update_visibility(self):
+        if self.mode == "Manual":
+            self.lbl_fan_info.pack(anchor="w", pady=(15, 2))
+            self.btn_fan.pack(anchor="w")
+        else:
+            self.lbl_fan_info.pack_forget()
+            self.btn_fan.pack_forget()
+
+    def on_mode_change(self, val):
+        self.mode = val
+        self.update_visibility()
+        if self.mode == "Auto" and self.active_field == "fan": self.select_field("temp")
+
+    def select_field(self, field):
+        self.active_field = field
+        
+        # Reset Borders
+        self.btn_temp.set_color("#FAFAFA", "black")
+        self.btn_temp.set_border("#E0E0E0", 1)
+        
+        self.btn_fan.set_color("#FAFAFA", "black")
+        self.btn_fan.set_border("#E0E0E0", 1)
+        
+        # Highlight Active (Light Blue BG + Primary Color Border)
+        active_btn = self.btn_temp if field == "temp" else self.btn_fan
+        active_btn.set_color("#E3F2FD", CLR_PRIMARY) # Blue Text/BG
+        active_btn.set_border(CLR_PRIMARY, 2)        # Blue Border
+
+    def on_key(self, key):
+        curr = self.temp_val if self.active_field == "temp" else self.fan_val
+        if key == '.':
+            if self.active_field == "fan": return 
+            if '.' in curr: return
+        if key == '⌫': curr = curr[:-1]
+        else:
+            if curr == "0" and key != '.': curr = key
+            else: curr += key
+        if not curr: curr = "0"
+        
+        if self.active_field == "temp":
+            self.temp_val = curr; self.btn_temp.itemconfig(self.btn_temp.text_id, text=curr)
+            self.lbl_temp_info.config(fg="#90A4AE", text="TARGET TEMP (15-35°C)")
+        else:
+            self.fan_val = curr; self.btn_fan.itemconfig(self.btn_fan.text_id, text=curr)
+            self.lbl_fan_info.config(fg="#90A4AE", text="FAN SPEED (0-100%)")
+
+    def on_confirm(self):
+        try: t = float(self.temp_val)
+        except: t = 0
+        try: f = int(float(self.fan_val))
+        except: f = 0
+        
+        valid = True
+        
+        # CHECK TEMP RANGE
+        if not (15 <= t <= 35):
+            self.btn_temp.set_color("#FFEBEE", CLR_DANGER) # Red BG
+            self.btn_temp.set_border(CLR_DANGER, 2)        # Red Border
+            self.lbl_temp_info.config(fg=CLR_DANGER, text="INVALID: Must be 15-35°C")
+            valid = False
+            
+        # CHECK FAN RANGE
+        if self.mode == "Manual" and not (0 <= f <= 100):
+            self.btn_fan.set_color("#FFEBEE", CLR_DANGER) # Red BG
+            self.btn_fan.set_border(CLR_DANGER, 2)        # Red Border
+            self.lbl_fan_info.config(fg=CLR_DANGER, text="INVALID: Must be 0-100%")
+            valid = False
+            
+        if not valid: return
+        self.backend.state["target_temp"] = int(t)
+        self.backend.state["fan_mode"] = self.mode
+        self.backend.state["fan_manual_val"] = f
+        self.result = True
+        self.destroy()
+
+# --- UPDATED: ADDED PROTOCOL SETUP POPUP  ----
 class ProtocolList(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent, bg=CLR_BG)
@@ -2201,19 +2549,59 @@ class ProtocolList(tk.Frame):
                          "The enclosure lid is open.\nDo you want to start anyway?",420,280,CLR_WARNING)
             
             if not c.result:
-                return;
-            
+                return
+  
+        # 3. THERMAL SETUP POPUP (NEW)
+        setup = PrtocolSetupPopup(self.c, self.c.backend)
+        if not setup.result: return # User cancelled  
+        
         if not self.selected_card: return
         fname = self.c.selected_file.get(); self.c.backend.ui_load_and_run(fname); self.c.show_frame("Running")  
 
+# --- UPADTED: ADDED FAN + MARQUEE TEXT + SENOSOR STAUS BAR + COLOR PROGRESS BAR  ---
 class Running(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent, bg=CLR_BG)
         self.c = controller
-        header = tk.Frame(self, bg=CLR_BG); header.pack(side="top", fill="x", pady=(20, 5), padx=50)
-        self.lbl_filename = tk.Label(header, textvariable=controller.selected_file, font=("Arial", 20, "bold"), fg=CLR_PRIMARY, bg=CLR_BG, anchor="w"); self.lbl_filename.pack(fill="x")
-        self.source_lbl = tk.Label(header, text="Source: --", font=("Arial", 11, "bold"), fg="#90A4AE", bg=CLR_BG, anchor="w"); self.source_lbl.pack(fill="x", pady=(2, 0))
-        card_outer = ShadowCard(self, bg="white"); card_outer.pack(fill="both", expand=True, padx=50, pady=(15, 10))
+        
+        # --- HEADER ---
+        header = tk.Frame(self, bg=CLR_BG); header.pack(side="top", fill="x", pady=(15, 5), padx=30)
+        header.columnconfigure(0, weight=1)
+        header.columnconfigure(1, weight=3)
+        header.columnconfigure(2, weight=1)
+        
+        # LEFT: Filename & Source
+        left_box = tk.Frame(header, bg=CLR_BG); left_box.grid(row=0, column=0, sticky="w")
+        self.lbl_filename = MarqueeLabel(left_box, text="--", width=250, height=30, 
+                                         font=("Arial", 18, "bold"), fg=CLR_PRIMARY, bg=CLR_BG)
+        self.lbl_filename.pack(anchor="w")
+        self.source_lbl = tk.Label(left_box, text="Source: --", font=("Arial", 11), fg="#90A4AE", bg=CLR_BG, anchor="w")
+        self.source_lbl.pack(anchor="w", pady=(2, 0))
+        
+        # CENTER: SENSOR DASHBOARD
+        dash = tk.Frame(header, bg="white", padx=10, pady=5, highlightbackground="#CFD8DC", highlightthickness=1)
+        dash.grid(row=0, column=1) 
+        
+        def mk_readout(parent, title, val_id, unit, col):
+            f = tk.Frame(parent, bg="white"); f.pack(side="left", padx=8)
+            tk.Label(f, text=title, font=("Arial", 7, "bold"), fg="#90A4AE", bg="white").pack(anchor="n")
+            l = tk.Label(f, text=f"-- {unit}", font=("Arial", 12, "bold"), fg=col, bg="white")
+            l.pack(anchor="n")
+            setattr(self, val_id, l)
+            
+        mk_readout(dash, "TARGET", "lbl_dash_target", "°C", CLR_PRIMARY)
+        mk_readout(dash, "ENCL.", "lbl_dash_env", "°C", "#546E7A")
+        mk_readout(dash, "BED", "lbl_dash_bed", "°C", "#FFA726")
+        mk_readout(dash, "HUMID", "lbl_dash_hum", "%", "#42A5F5")
+        mk_readout(dash, "PRESS", "lbl_dash_pres", "hPa", "#78909C")
+        mk_readout(dash, "CPU", "lbl_dash_cpu", "°C", "#EF5350")
+
+        # RIGHT: GEAR
+        right_box = tk.Frame(header, bg=CLR_BG); right_box.grid(row=0, column=2, sticky="e")
+        tk.Label(right_box, text="⚙️", font=("Arial", 24), bg=CLR_BG, fg="#B0BEC5").pack()
+
+        # --- MAIN CARD ---
+        card_outer = ShadowCard(self, bg="white"); card_outer.pack(fill="both", expand=True, padx=40, pady=(10, 10))
         main_inner = tk.Frame(card_outer.inner, bg="white", padx=30, pady=20); main_inner.pack(fill="both", expand=True)
         top_row = tk.Frame(main_inner, bg="white"); top_row.pack(fill="x", pady=(0, 10))
         self.percent_lbl = tk.Label(top_row, text="0%", font=("Arial", 48, "bold"), fg=CLR_PRIMARY, bg="white"); self.percent_lbl.pack(side="left")
@@ -2228,27 +2616,78 @@ class Running(tk.Frame):
         tk.Label(c_inner, text="CURRENT OPERATION:", font=("Arial", 9, "bold"), fg="#90A4AE", bg="#F7F9FA").pack(anchor="w")
         self.cmd_lbl = tk.Label(c_inner, text="Waiting...", font=("Courier New", 16, "bold"), fg="#263238", bg="#F7F9FA", anchor="w", wraplength=600, justify="left"); self.cmd_lbl.pack(fill="x", pady=(2, 0))
         self.desc_lbl = tk.Label(c_inner, text="--", font=("Arial", 12, "italic"), fg="#546E7A", bg="#F7F9FA", anchor="w", wraplength=600, justify="left"); self.desc_lbl.pack(fill="x", pady=(4, 0))
-        footer = tk.Frame(self, bg=CLR_BG, height=80); footer.pack(side="bottom", fill="x", pady=(5, 20), padx=50)
-        self.btn_pause = RoundedButton(footer, text="PAUSE", command=lambda: self.c.backend.ui_pause_resume(), width=150, height=55, bg_color=CLR_WARNING, hover_color=CLR_WARNING_HOVER); self.btn_pause.pack(side="left")
-        RoundedButton(footer, text="STOP", command=self.cancel_run, width=150, height=55, bg_color=CLR_DANGER, hover_color=CLR_DANGER_HOVER).pack(side="right")
 
+        # --- FOOTER ---
+        footer = tk.Frame(self, bg=CLR_BG, height=80); footer.pack(side="bottom", fill="x", pady=(5, 20), padx=40)
+        footer.columnconfigure(0, weight=0); footer.columnconfigure(1, weight=1); footer.columnconfigure(2, weight=0)
+        
+        self.btn_pause = RoundedButton(footer, text="PAUSE", command=lambda: self.c.backend.ui_pause_resume(), width=130, height=55, bg_color=CLR_WARNING, hover_color=CLR_WARNING_HOVER)
+        self.btn_pause.grid(row=0, column=0, sticky="w")
+        
+        self.f_center = tk.Frame(footer, bg=CLR_BG); self.f_center.grid(row=0, column=1)
+        
+        # --- FAN SLIDER & HINT ---
+        # Hint Label (Visible only in Manual)
+        self.lbl_fan_hint = tk.Label(self.f_center, text="← Drag to Adjust →", font=("Arial", 8, "bold"), fg="#90A4AE", bg=CLR_BG)
+        self.lbl_fan_hint.pack(pady=(0, 2)) # Small padding bottom
+        
+        self.fan_slider = AnimatedFanSlider(self.f_center, width=320, height=55, bg_color=CLR_BG, command=self.on_fan_change)
+        self.fan_slider.pack()
+        
+        RoundedButton(footer, text="STOP", command=self.cancel_run, width=130, height=55, bg_color=CLR_DANGER, hover_color=CLR_DANGER_HOVER).grid(row=0, column=2, sticky="e")
+
+    def on_fan_change(self, val): self.c.backend.state["fan_manual_val"] = int(val)
     def cancel_run(self):
         confirm = CustomConfirmPopup(self.c, "⏹️", "STOP PROTOCOL", "Are you sure you want to abort?")
         if confirm.result: self.c.backend.ui_stop()
 
     def update_view(self, state):
-        progress = state["progress"]; status = state["status"]; cmd_text = state["current_line"]; desc_text = state.get("current_desc", ""); est_time = state.get("est", "--:--:--:--"); source = state.get("started_by", "Unknown")
-        self.source_lbl.config(text=f"Source: {source}"); self.percent_lbl.config(text=f"{int(progress)}%"); self.prog.set_progress(progress); self.time_lbl.config(text=f"Est: {est_time}")
-        is_paused = "Paused" in status; self.spinner.set_paused(is_paused)
-        if is_paused:
-            reason = state.get('pause_reason', 'UNKNOWN').upper(); self.status_badge.config(text=f"● PAUSED ({reason})", fg="#E65100", bg="#FFF3E0")
+        self.lbl_filename.set_text(self.c.selected_file.get())
+        
+        progress = state["progress"]; status = state["status"]; cmd_text = state["current_line"]; desc_text = state.get("current_desc", "")
+        self.source_lbl.config(text=f"Source: {state.get('started_by','-')}")
+        self.percent_lbl.config(text=f"{int(progress)}%"); self.prog.set_progress(progress); self.time_lbl.config(text=f"Est: {state.get('est','--:--')}")
+        
+        is_paused = "Paused" in status
+        is_error = "Error" in status or "Stopped" in status
+        
+        self.spinner.set_paused(is_paused)
+        
+        if is_error:
+            self.status_badge.config(text=status.upper(), fg=CLR_DANGER, bg="#FFEBEE")
+            self.cmd_lbl.config(text=status, fg=CLR_DANGER); self.desc_lbl.config(text="Operation Halted", fg="#B71C1C")
+            self.percent_lbl.config(fg=CLR_DANGER); self.prog.set_color(CLR_DANGER); self.btn_pause.set_color("#CFD8DC", "#CFD8DC")
+        elif is_paused:
+            reason = state.get('pause_reason', 'UNKNOWN').upper()
+            self.status_badge.config(text=f"● PAUSED ({reason})", fg="#E65100", bg="#FFF3E0")
             self.cmd_lbl.config(text=f"PAUSED ({reason})", fg="#E65100"); self.desc_lbl.config(text="System waiting for resume...", fg="#BF360C")
             self.btn_pause.itemconfig(self.btn_pause.text_id, text="RESUME"); self.btn_pause.set_color(CLR_SUCCESS, CLR_SUCCESS_HOVER)
+            self.percent_lbl.config(fg=CLR_WARNING); self.prog.set_color(CLR_WARNING)
         else:
             self.status_badge.config(text="● RUNNING", fg=CLR_SUCCESS, bg="#E8F5E9")
             self.cmd_lbl.config(text=cmd_text, fg="#263238"); self.desc_lbl.config(text=desc_text if desc_text else "Processing...", fg="#546E7A")
             self.btn_pause.itemconfig(self.btn_pause.text_id, text="PAUSE"); self.btn_pause.set_color(CLR_WARNING, CLR_WARNING_HOVER)
+            self.percent_lbl.config(fg=CLR_PRIMARY); self.prog.set_color(CLR_PRIMARY)
+        
+        sens = state.get("sensor_data", {})
+        self.lbl_dash_target.config(text=f"{state.get('target_temp',0)} °C")
+        self.lbl_dash_env.config(text=f"{sens.get('bme_temp',0):.1f} °C")
+        self.lbl_dash_bed.config(text=f"{sens.get('adt_temp',0):.1f} °C")
+        self.lbl_dash_hum.config(text=f"{int(sens.get('bme_hum',0))} %")
+        self.lbl_dash_pres.config(text=f"{int(sens.get('bme_press',0))} hPa")
+        self.lbl_dash_cpu.config(text=f"{sens.get('cpu_temp',0)} °C")
+
+        # --- FAN LOGIC (Updated to Show/Hide Hint) ---
+        mode = state.get("fan_mode", "Manual")
+        if mode == "Auto":
+            self.fan_slider.set_read_only(True)
+            self.fan_slider.set_value(state.get("fan_duty", 0))
+            self.lbl_fan_hint.pack_forget() # HIDE Hint in Auto
+        else:
+            self.fan_slider.set_read_only(False)
+            self.lbl_fan_hint.pack(before=self.fan_slider, pady=(0, 2)) # SHOW Hint in Manual     
             
+                        
 if __name__ == "__main__":
     app = KioskApp()
     app.mainloop()
