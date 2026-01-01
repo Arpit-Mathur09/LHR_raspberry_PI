@@ -1340,9 +1340,9 @@ class SettingsTray(tk.Frame):
         self.update_bulb_visuals()  
    
     def show_about(self):
-        # UPDATED TO V1.3
+        # UPDATED TO V1.4
         popup = CustomPopup(self.winfo_toplevel(), "About", "SYSTEM INFO", 
-                            "Liquid Handler v1.3\nRunning on Raspberry Pi 4", 
+                            "Liquid Handler v1.4\nRunning on Raspberry Pi 4", 
                             CLR_PRIMARY, "ℹ")
         self.wait_window(popup)
 
@@ -1978,7 +1978,7 @@ class Home(tk.Frame):
         super().__init__(parent, bg=CLR_BG)
         card = ShadowCard(self, bg=CLR_CARD)
         card.place(relx=0.5, rely=0.5, anchor="center", width=500, height=300)
-        tk.Label(card.inner, text="Liquid Handler v1.3", font=("Arial", 22, "bold"), bg=CLR_CARD).pack(pady=(20, 25))
+        tk.Label(card.inner, text="Liquid Handler v1.4", font=("Arial", 22, "bold"), bg=CLR_CARD).pack(pady=(20, 25))
         RoundedButton(card.inner, text="CALIBRATION", width=250, height=55, bg_color="#FF9800", hover_color=CLR_WARNING_HOVER, command=lambda: controller.show_frame("Calibrate")).pack(pady=10)
         RoundedButton(card.inner, text="PROTOCOLS", width=250, height=55, bg_color=CLR_PRIMARY, hover_color=CLR_PRIMARY_HOVER, command=lambda: controller.show_frame("ProtocolList")).pack(pady=10)
 
@@ -2552,13 +2552,13 @@ class ProtocolList(tk.Frame):
                 return
   
         # 3. THERMAL SETUP POPUP (NEW)
-        setup = PrtocolSetupPopup(self.c, self.c.backend)
+        setup = ProtocolSetupPopup(self.c, self.c.backend)
         if not setup.result: return # User cancelled  
         
         if not self.selected_card: return
         fname = self.c.selected_file.get(); self.c.backend.ui_load_and_run(fname); self.c.show_frame("Running")  
 
-# --- UPADTED: ADDED FAN + MARQUEE TEXT + SENOSOR STAUS BAR + COLOR PROGRESS BAR  ---
+# --- UPDATED: ADDED FAN + MARQUEE TEXT + SENOSOR STAUS BAR + COLOR PROGRESS BAR  ---
 class Running(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent, bg=CLR_BG)
