@@ -617,10 +617,11 @@ class RobotClient:
                 if not self.server_connected: self.log("✅ Connected to Server"); self.server_connected = True
                 for cmd in r.json().get("commands", []): self.handle_server_command(cmd)
         except: 
-            if self.server_connected: self.log("⚠️ Lost connection to Server"); self.server_connected = False
-
-    def handle_server_command(self, cmd):
+            if self.server_connected: self.log("⚠️ Lost connection to Server"); self.server_connected = False  
+      
+    """ def handle_server_command(self, cmd):
         ev = cmd["event"]
+        printf(f"DEBUG: Handling server command: {ev}", flush=True)
         if ev == "PAUSE": self.command_queue.put(("REMOTE_PAUSE", None))
         elif ev == "RESUME": self.command_queue.put(("REMOTE_RESUME", None))
         elif ev == "CLEAR": self.command_queue.put(("REMOTE_STOP", None))
@@ -634,7 +635,57 @@ class RobotClient:
                 self.ser.write(b"T00\n")
         elif ev == "CALIB_END": 
             self.set_calibration_mode(False, None)
+        elif ev == "SET_THERMAL":
+            # Pass the dictionary data straight to the queue
+            self.command_queue.put(("SET_THERMAL", cmd["data"]))
+ """
+ 
+    def handle_server_command(self, cmd):
+        # DEBUG: Print every command received to verify connection
+        print(f"DEBUG: Processing Server Command -> {cmd}", flush=True)
+        
+        ev = cmd.get("event")
+        data = cmd.get("data") # Get the data payload
 
+        # 1. Control Commands
+        if ev == "PAUSE": 
+            self.command_queue.put(("REMOTE_PAUSE", None))
+        elif ev == "RESUME": 
+            self.command_queue.put(("REMOTE_RESUME", None))
+        elif ev == "CLEAR": 
+            self.command_queue.put(("REMOTE_STOP", None))
+        
+        # 2. Thermal Setup
+        elif ev == "SET_THERMAL":
+            # Pass the dictionary directly
+            self.command_queue.put(("SET_THERMAL", data))
+            
+        # 3. Download & Run (CRITICAL FIX)
+        # Server sends event "DOWNLOAD_AND_RUN". Old code expected "NEW_FILE".
+        elif ev == "DOWNLOAD_AND_RUN" or ev == "NEW_FILE":
+            # Handle both list format [filename, source] and dict format
+            if isinstance(data, list):
+                self.command_queue.put(("DOWNLOAD_AND_RUN", data))
+            elif isinstance(data, str):
+                # Fallback for old "NEW_FILE" format just in case
+                self.command_queue.put(("DOWNLOAD_AND_RUN", [data, "Remote"]))
+            else:
+                # Fallback if data is missing but filename is in cmd root
+                fname = cmd.get("filename")
+                if fname: self.command_queue.put(("DOWNLOAD_AND_RUN", [fname, "Remote"]))
+
+        # 4. Calibration
+        elif ev == "SERIAL_SEND":
+            if self.ser and data: 
+                self.log(f"TX (Remote): {data}")
+                self.ser.write((data + "\n").encode())
+        elif ev == "CALIB_START": 
+            self.set_calibration_mode(True, "Remote")
+            if self.ser: self.ser.write(b"T00\n")
+        elif ev == "CALIB_END": 
+            self.set_calibration_mode(False, None)
+            
+            
     def parse_gcode_file(self, lines):
         steps = []; pending_desc = ""
         for line in lines:
@@ -752,7 +803,12 @@ class RobotClient:
                     if cmd_type == "MANUAL" and self.ser: self.ser.write((data + "\n").encode())
                     elif cmd_type == "LOAD_LOCAL": fname, source = data; self.load_local_protocol(fname, source); waiting_for_response = False
                     elif cmd_type == "DOWNLOAD_AND_RUN": fname, source = data; self.download_protocol(fname, source); waiting_for_response = False
-                    
+                    elif cmd_type == "SET_THERMAL":
+                        # Apply settings received from Server Popup
+                        self.state["target_temp"] = int(data.get("target_temp", 0))
+                        self.state["fan_mode"] = data.get("fan_mode", "Auto")
+                        self.state["fan_manual_val"] = int(data.get("fan_manual_val", 0))
+                        self.log(f"🌡 Settings Rx: {self.state['target_temp']}C, Fan: {self.state['fan_mode']}")
                     # 2. RUNTIME COMMANDS (Guard Clause Added)
                     # If we have no steps loaded, IGNORE these commands
                     # to prevent "Running: None" ghost state.
