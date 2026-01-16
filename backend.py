@@ -185,8 +185,86 @@ class LightController:
         self.strip.fill(color)
         self.strip.show()
 
+
+# --- PIPETTE MANAGER ---
+class PipetteManager:
+    def __init__(self, bus_id=1):
+        self.bus_id = bus_id
+        # Define structure
+        self.slots = {
+            "left": {"addr": 0x50, "name": "Slot 1", "model": None, "id": None, "found": False},
+            "right": {"addr": 0x51, "name": "Slot 2", "model": None, "id": None, "found": False}
+        }
+        # Initial scan
+        self.scan_pipettes()
+
+    def read_string(self, bus, addr, start_mem, length):
+        """Reads ASCII string from EEPROM."""
+        try:
+            bus.write_byte(addr, start_mem) # Set memory pointer
+            chars = []
+            for i in range(length):
+                byte = bus.read_byte(addr)
+                if byte != 0xFF and 32 <= byte <= 126: chars.append(chr(byte))
+            return "".join(chars).strip()
+        except: return None
+
+    def scan_pipettes(self):
+        """Scans and returns TRUE if something changed."""
+        changed = False
+        
+        try:
+            bus = smbus2.SMBus(self.bus_id)
+        except: return False
+
+        for key, slot in self.slots.items():
+            addr = slot["addr"]
+            was_found = slot["found"]
+            
+            try:
+                # 1. Ping the device
+                bus.write_quick(addr)
+                
+                # 2. Device exists. Read Manufacturing String to confirm validity.
+                mfg = self.read_string(bus, addr, 0x00, 8)
+                
+                if mfg and "opentron" in mfg.lower():
+                    # Valid Pipette Detected
+                    if not was_found:
+                        # NEW ATTACHMENT
+                        serial = self.read_string(bus, addr, 0x30, 20)
+                        model = self.read_string(bus, addr, 0x60, 20)
+                        
+                        slot["found"] = True
+                        slot["id"] = serial if serial else "Unknown ID"
+                        slot["model"] = model if model else "Unknown Model"
+                        print(f"✅ Pipette Attached {slot['name']}: {slot['model']}")
+                        changed = True
+                else:
+                    # Device at address, but garbage data (or I2C noise)
+                    if was_found:
+                        print(f"⚠️ Pipette Error {slot['name']} (Read Fail)")
+                        slot["found"] = False
+                        slot["id"] = None; slot["model"] = None
+                        changed = True
+
+            except OSError:
+                # 3. Device NOT responding (Removed)
+                if was_found:
+                    print(f"❌ Pipette Removed {slot['name']}")
+                    slot["found"] = False
+                    slot["id"] = None; slot["model"] = None
+                    changed = True
+                    
+        bus.close()
+        return changed
+
+    def get_state(self):
+        return {k: v.copy() for k, v in self.slots.items()}
+
 class RobotClient:
     def __init__(self):
+        self.pipettes = PipetteManager() # <--- Initialize here
         self.state = {
             "status": "Idle", "filename": "None", "progress": 0,
             "current_line": "Ready", "current_desc": "", "logs": [],            
@@ -211,14 +289,15 @@ class RobotClient:
             "fan_manual_val": 0,   # User Slider %
             "heater_duty": 0,
             "fan_duty": 0,
+            "pipettes": self.pipettes.get_state(), # <--- Add to shared state
             
         }
+        
         # --- INIT PWM DEVICES ---
         self.PIN_HEATER = 12
         self.PIN_FAN = 13
         self.heater = PWMDevice(self.PIN_HEATER)
         self.fan = PWMDevice(self.PIN_FAN)
-        
         # --- INIT PID ---
         self.pid = PIDController(kp=5.0, ki=0.05, kd=1.0) # Tune these values!
         
@@ -608,7 +687,8 @@ class RobotClient:
             # ADD THESE NEW FIELDS
             "light_on": self.state["light_on"],
             "sensors": self.state["sensor_data"],
-            "lid_open": self.state["lid_open"]
+            "lid_open": self.state["lid_open"],
+            "pipettes": self.state["pipettes"]
         }
         self.log_accumulator = [] 
         try:
@@ -789,11 +869,23 @@ class RobotClient:
     def _run_loop(self):
         last_sync = time.time()
         waiting_for_response = False
+        last_pipette_check = 0  # <--- NEW TIMER VARIABLE
         
         while True:
             self.update_thermal_control()
             self.calculate_estimate()
-            if time.time() - last_sync > 0.5: self.sync_with_server(); last_sync = time.time()
+            # --- 1. CONTINUOUS PIPETTE SCAN (Every 2 Seconds) ---
+            if time.time() - last_pipette_check > 2.0:
+                # Only update state if hardware actually changed (prevents log spam)
+                if self.pipettes.scan_pipettes():
+                    self.state["pipettes"] = self.pipettes.get_state()
+                    # We don't need to force sync here; the next sync_with_server 
+                    # loop (below) will pick up the new state automatically.
+                last_pipette_check = time.time()
+                
+            if time.time() - last_sync > 0.5: 
+                self.sync_with_server() 
+                last_sync = time.time()
             
         
             try:
