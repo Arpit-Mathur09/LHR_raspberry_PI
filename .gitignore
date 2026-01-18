@@ -3,4 +3,7 @@ logs/
 recent_protocols/
 test_protocols/
 __pycache__/
+pc_logs/
+pc_protocols/
+env/
 
