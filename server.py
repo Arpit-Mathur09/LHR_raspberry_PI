@@ -1,5 +1,4 @@
-
-#v1.3 lidopen popup and sensor readings 
+#
 import os
 import time
 from datetime import datetime
@@ -12,6 +11,9 @@ UPLOAD_FOLDER = 'pc_protocols'
 PC_LOG_ROOT = 'pc_logs'
 PROTOCOLS_LOG_DIR = os.path.join(PC_LOG_ROOT, 'protocols_log')
 SYSTEM_LOG_FILE = os.path.join(PC_LOG_ROOT, 'system.log')
+# --- REMOTE VIDEO CONFIG ---
+VIDEO_BASE_URL ="https://collaboration-perspectives-distinguished-sister.trycloudflare.com"
+
 
 for folder in [UPLOAD_FOLDER, PC_LOG_ROOT, PROTOCOLS_LOG_DIR]:
     os.makedirs(folder, exist_ok=True)
@@ -53,7 +55,7 @@ def protocol_log(filename, log_data):
 # --- BROWSER ROUTES ---
 @app.route('/')
 def index():
-    return render_template_string(HTML_CODE)
+    return render_template_string(HTML_CODE,video_url=VIDEO_BASE_URL)
 
 """ @app.route('/upload', methods=['POST'])
 def upload():
@@ -447,6 +449,11 @@ HTML_CODE = r"""
                 </div>
             </div>
         </div>
+        <iframe
+            src="{{ video_url }}/cam"
+            style="width:100%; height:300px; border:none;"
+            allow="autoplay; camera; microphone">
+        </iframe>
 
         <div class="card" style="border-color: var(--dark); margin-top: 20px;">
             <h2>🔧 Calibration</h2>
@@ -656,6 +663,3 @@ HTML_CODE = r"""
 """
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
-
-    
-
