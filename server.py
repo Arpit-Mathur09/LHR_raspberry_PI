@@ -1,27 +1,26 @@
-#server v1.5 web Stream and pipettes
-#mediamtx -> webrtc -> cloudflare tunnel -> publi_url -> extract -> load in iframe
-# work around to use free streaming with changing url 
-# video url 
-import os
+#server v1.5 web Stream on cloud enabled server
+#mediamtx -> webrtc -> https://app.lhrpi.dpdns.org/
 import time
 from datetime import datetime
-from flask import Flask, request, render_template_string, send_from_directory, jsonify
+from flask import Flask, request,render_template_string, send_from_directory, jsonify, Response
 import subprocess
 import threading
 import re
 import signal
 import atexit
-
-
+from functools import wraps
+import requests
 
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-UPLOAD_FOLDER = 'pc_protocols'
-PC_LOG_ROOT = 'pc_logs'
+UPLOAD_FOLDER = '/home/lhr/pc_protocols'
+PC_LOG_ROOT = '/home/lhr/pc_logs'
 PROTOCOLS_LOG_DIR = os.path.join(PC_LOG_ROOT, 'protocols_log')
 SYSTEM_LOG_FILE = os.path.join(PC_LOG_ROOT, 'system.log')
-
+# MediaMTX base URL - hardcoded default but can be overridden with environment variable
+MEDIAMTX_BASE = os.environ.get('MEDIAMTX_BASE', 'http://localhost:8889')
+VIDEO_STREAM_URL = os.environ.get('VIDEO_STREAM_URL', f"{MEDIAMTX_BASE}/cam/")
 #stream variables
 cloudflared_process = None
 video_public_url = None
@@ -50,62 +49,6 @@ state = {
     "sensors": {}
 }
 
-# --- HELPER FUNCTIONS ---
-def start_stream_tunnel():
-    """Keep cloudflared running — restart if it exits and capture public URL."""
-    global video_public_url, cloudflared_process
-
-    cmd = [
-        "cloudflared",
-        "tunnel",
-        "--url", "http://192.168.31.83:8889",
-        "--config", "/dev/null",
-        "--no-autoupdate"
-    ]
-
-    while not stop_event.is_set():
-        try:
-            cloudflared_process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                preexec_fn=os.setsid  # detach child into its own session
-            )
-
-            for line in cloudflared_process.stdout:
-                if stop_event.is_set():
-                    break
-                print("[cloudflared-stream]", line.strip())
-                if video_public_url is None:
-                    match = re.search(r"https://[a-zA-Z0-9\-]+\.trycloudflare\.com", line)
-                    if match:
-                        video_public_url = match.group(0)
-                        print("🎥 Public STREAM URL:", video_public_url)
-
-            # If we reach here the process exited or we broke out
-            print("cloudflared process exited, restarting in 2s...")
-        except Exception as e:
-            print("cloudflared watcher error:", e)
-        finally:
-            try:
-                if cloudflared_process and cloudflared_process.poll() is None:
-                    # kill the whole process group created by setsid
-                    try:
-                        os.killpg(cloudflared_process.pid, signal.SIGTERM)
-                    except Exception:
-                        cloudflared_process.terminate()
-            except Exception:
-                pass
-            cloudflared_process = None
-
-        # quick exit if requested
-        if stop_event.is_set():
-            break
-        time.sleep(2)
-
-
 def system_log(msg):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     entry = f"[{timestamp}] {msg}"
@@ -120,35 +63,73 @@ def protocol_log(filename, log_data):
         f.write(log_data) 
 
 # --- BROWSER ROUTES ---
-@app.route('/')
+USERNAME = "admin"
+PASSWORD = "strongpassword"
+
+def check_auth(username, password):
+    return username == USERNAME and password == PASSWORD
+
+def authenticate():
+    return Response(
+        "Authentication required", 401,
+        {"WWW-Authenticate": 'Basic realm="Login Required"'}
+    )
+
+def requires_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.authorization
+        if not auth or not check_auth(auth.username, auth.password):
+            return authenticate()
+        return f(*args, **kwargs)
+    return decorated
+
+@app.route("/webrtc/offer", methods=["POST"])
+def webrtc_offer():
+    # Forward SDP offer to the configured mediamtx WebRTC endpoint using WHEP protocol.
+    # WHEP (WebRTC HTTP Egress Protocol) is the standard for WebRTC reading on mediamtx.
+    stream_path = "cam"  # The path configured in mediamtx.yml
+    targets = [
+        f"{MEDIAMTX_BASE}/{stream_path}/whep",
+    ]
+    
+    last_exc = None
+    for target in targets:
+        try:
+            system_log(f"Forwarding WebRTC offer to {target}")
+            r = requests.post(
+                target,
+                data=request.data,
+                headers={"Content-Type": "application/sdp"},
+                timeout=10
+            )
+        except Exception as e:
+            last_exc = e
+            system_log(f"Error forwarding WebRTC offer to {target}: {e}")
+            continue
+
+        # Log useful diagnostics
+        ct = r.headers.get('Content-Type', '')
+        snippet = (r.content[:200] if isinstance(r.content, (bytes, bytearray)) else str(r.content))
+        system_log(f"Upstream {target} returned {r.status_code} Content-Type:{ct} len={len(r.content) if r.content else 0} snippet={snippet!r}")
+
+        # WHEP expects 201 Created with SDP answer, but also accept 200 OK for compatibility
+        text = r.content.decode('utf-8', errors='replace') if isinstance(r.content, (bytes, bytearray)) else str(r.content)
+        if r.status_code in [200, 201] and text.strip().startswith('v='):
+            system_log(f"✅ Valid SDP answer received from {target} (status {r.status_code})")
+            return (r.content, r.status_code, {"Content-Type": "application/sdp"})
+
+        # Otherwise try next target
+    # If we get here, all upstream attempts failed
+    if last_exc:
+        system_log(f"❌ All mediamtx targets failed. Last error: {last_exc}")
+    return ("Upstream WebRTC error or invalid SDP returned", 502)
+
+    
+@app.route("/")
+@requires_auth
 def index():
-    return render_template_string(HTML_CODE)
-
-""" @app.route('/upload', methods=['POST'])
-def upload():
-    # 1. Block if actively calibrating
-    if state["calib_active"]:
-        return "System is Calibrating. Please finish first.", 403
-        
-    # 2. Block if NOT calibrated yet
-    if not state["is_calibrated"]:
-        return "System requires calibration before running.", 403
-
-    file = request.files['upload']
-    if file:
-        file.save(os.path.join(UPLOAD_FOLDER, file.filename))
-        
-        # Immediate UI Update
-        state["file_running"] = file.filename
-        state["status_text"] = "Starting..."
-        state["progress"] = 0
-        state["started_by"] = "Remote"
-        
-        # Queue Command for Pi
-        state["pending_commands"].append({"event": "NEW_FILE", "filename": file.filename})
-        system_log(f"USER: Uploaded {file.filename}")
-        return "OK"
-    return "Error", 400 """
+    return render_template_string(HTML_CODE,video_public_url=VIDEO_STREAM_URL)
     
 @app.route('/upload', methods=['POST'])
 def upload():
@@ -307,12 +288,7 @@ def pi_sync():
     return jsonify({"commands": cmds_to_send})
 
 
-@app.route("/video_url")
-def video_url():
-    return {
-        "ready": video_public_url is not None,
-        "url": video_public_url
-    }
+
 
 # --- HTML UI CODE ---
 # --- HTML UI CODE ---
@@ -523,40 +499,129 @@ HTML_CODE = r"""
                 </div>
             </div>
         </div>
-       <iframe
-  id="streamFrame"
-  style="width:100%; height:300px; border:none; background:black;"
-></iframe>
 
-<script>
-let streamLoaded = false;
+        <div class="card" style="border-color: #17a2b8; margin-top: 20px;">
+            <h2>📹 Live Video Stream</h2>
+            <video id="video" autoplay muted playsinline controls style="width: 100%; height: 500px; background: #000; border-radius: 8px;"></video>
+            <div id="videoStatus" style="text-align: center; margin-top: 10px; font-size: 0.9rem; color: #666;">Connecting to stream...</div>
+        </div>
 
-async function pollVideoURL() {
-  try {
-    const r = await fetch("/video_url");
-    const d = await r.json();
+    <script>
+    const video = document.getElementById("video");
+    const statusDiv = document.getElementById("videoStatus");
+    
+    const pc = new RTCPeerConnection({
+        iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }]
+    });
+    
+    pc.addTransceiver("video", { direction: "recvonly" });
+    
+    pc.ontrack = e => {
+        console.log("Track received:", e.track.kind);
+        video.srcObject = e.streams[0];
+        
+        // Ensure video plays (browsers require explicit play after setting srcObject)
+        video.play().catch(err => {
+            console.warn("Auto-play blocked by browser, video needs unmute:", err);
+        });
+        
+        statusDiv.innerText = "✅ Stream connected";
+        statusDiv.style.color = "#28a745";
+    };
+    
+    pc.onconnectionstatechange = () => {
+        console.log("Connection state:", pc.connectionState);
+        if (pc.connectionState === "failed") {
+            statusDiv.innerText = "❌ Connection failed";
+            statusDiv.style.color = "#dc3545";
+        }
+    };
+    
+    pc.onerror = (err) => {
+        console.error("PeerConnection error:", err);
+    };
 
-    if (d.ready && d.url && !streamLoaded) {
-      const iframe = document.getElementById("streamFrame");
+    let retryCount = 0;
+    const MAX_RETRIES = 3;
+    const RETRY_DELAY_MS = 2000;
 
-      // delay to allow DNS propagation
-      setTimeout(() => {
-        iframe.src = d.url + "/cam";
-        document.getElementById("videoStatus").innerText =
-          "🎥 Live stream: " + d.url + "/cam";
-      }, 4000);
+    async function start() {
+        try {
+            statusDiv.innerText = "🔄 Creating offer...";
+            statusDiv.style.color = "#ffc107";
+            
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            let sdp = offer.sdp;
+            
+            // Note: With WHEP protocol, the path is in the URL (/cam/whep)
+            // so we don't need to add x-mediamtx-path attribute
+            
+            console.log("Sending offer to /webrtc/offer...");
+            const res = await fetch("/webrtc/offer", {
+                method: "POST",
+                body: sdp,
+                headers: { "Content-Type": "application/sdp" },
+                timeout: 5000
+            });
 
-      streamLoaded = true;
+            const answerSDP = await res.text();
+            console.log("Response status:", res.status);
+            
+            if (!res.ok) {
+                console.error('WebRTC offer failed:', res.status, answerSDP);
+                statusDiv.innerText = "❌ Handshake failed: " + res.status;
+                statusDiv.style.color = "#dc3545";
+                scheduleRetry();
+                return;
+            }
+            
+            if (!answerSDP || !answerSDP.trim().startsWith('v=')) {
+                console.error('Invalid SDP answer received:', answerSDP.slice(0,300));
+                statusDiv.innerText = "❌ Invalid SDP response";
+                statusDiv.style.color = "#dc3545";
+                scheduleRetry();
+                return;
+            }
+            
+            try {
+                console.log("Setting remote description...");
+                await pc.setRemoteDescription({ type: "answer", sdp: answerSDP });
+                console.log("Remote description set successfully");
+                statusDiv.innerText = "🔗 Connecting...";
+                statusDiv.style.color = "#17a2b8";
+                retryCount = 0; // Reset on success
+            } catch (err) {
+                console.error('Failed to set remote description:', err, answerSDP.slice(0,300));
+                statusDiv.innerText = "❌ Failed to set answer: " + err.message;
+                statusDiv.style.color = "#dc3545";
+                scheduleRetry();
+            }
+        } catch (err) {
+            console.error('Error in WebRTC start:', err);
+            statusDiv.innerText = "❌ Error: " + err.message;
+            statusDiv.style.color = "#dc3545";
+            scheduleRetry();
+        }
     }
-  } catch (e) {}
-}
 
-setInterval(pollVideoURL, 2000);
-</script>
+    function scheduleRetry() {
+        if (retryCount < MAX_RETRIES) {
+            retryCount++;
+            const delay = RETRY_DELAY_MS * retryCount;
+            console.log(`Scheduling retry ${retryCount}/${MAX_RETRIES} in ${delay}ms...`);
+            statusDiv.innerText = `🔄 Retrying in ${Math.floor(delay/1000)}s... (${retryCount}/${MAX_RETRIES})`;
+            statusDiv.style.color = "#ffc107";
+            setTimeout(start, delay);
+        } else {
+            statusDiv.innerText = "❌ Connection failed. Refresh page to retry.";
+            statusDiv.style.color = "#dc3545";
+        }
+    }
 
-
-
-
+    // Start connection on page load
+    start();
+    </script>
 
         <div class="card" style="border-color: var(--dark); margin-top: 20px;">
             <h2>🔧 Calibration</h2>
@@ -764,34 +829,6 @@ setInterval(pollVideoURL, 2000);
 </body>
 </html>
 """
-def _cleanup_cloudflared():
-    global cloudflared_process
-    stop_event.set()
-    try:
-        if cloudflared_process and cloudflared_process.poll() is None:
-            try:
-                os.killpg(cloudflared_process.pid, signal.SIGTERM)
-            except Exception:
-                cloudflared_process.terminate()
-    except Exception:
-        pass
-
-def _signal_handler(signum, frame):
-    system_log(f"Signal {signum} received — shutting down.")
-    _cleanup_cloudflared()
-    # give it a moment, then force exit
-    time.sleep(0.3)
-    os._exit(0)
-
-atexit.register(_cleanup_cloudflared)
 
 if __name__ == '__main__':
-    # Avoid starting the cloudflared watcher twice when Flask debug reloader spawns two processes.
-    if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
-        # register signals only in the running child process
-        signal.signal(signal.SIGINT, _signal_handler)
-        signal.signal(signal.SIGTERM, _signal_handler)
-        threading.Thread(target=start_stream_tunnel, daemon=True).start()
-
-    # You can set use_reloader=False instead to prevent double-start as well.
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000)
