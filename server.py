@@ -10,7 +10,8 @@ import signal
 import atexit
 from functools import wraps
 import requests
-
+#OS added for the files 
+import os 
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
@@ -380,7 +381,7 @@ HTML_CODE = r"""
         .toggle-active { background: var(--primary); color: white; flex: 1; }
 
         /* SPINNERS */
-        .blocker-overlay { display: none; position: fixed; z-index: 9999; left: 0; top: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.95); text-align: center; padding-top: 15%; }
+        .blocker-overlay { display: none; position: fixed; z-index: 999; left: 0; top: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.4); text-align: center; padding-top: 15%; }
         .info-modal { display: none; position: fixed; z-index: 1001; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); }
         .info-content { background-color: white; margin: 20% auto; padding: 30px; border-radius: 10px; width: 300px; text-align: center; box-shadow: 0 5px 15px rgba(0,0,0,0.3); }
         .spinner { border: 4px solid #f3f3f3; border-top: 4px solid #007bff; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto 20px auto; }
@@ -436,7 +437,7 @@ HTML_CODE = r"""
             <span id="lidStatus" class="lid-badge lid-closed">Lid Closed</span>
         </header>
 
-        <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 20px;">
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px;">
             
             <div>
                 <div class="card" style="border-color: #17a2b8;">
@@ -500,7 +501,7 @@ HTML_CODE = r"""
             </div>
         </div>
 
-        <div class="card" style="border-color: #17a2b8; margin-top: 20px;">
+        <div class="card" style="border-color: #17a2b8; margin-top: 20px; z-index:1000;">
             <h2>📹 Live Video Stream</h2>
             <video id="video" autoplay muted playsinline controls style="width: 100%; height: 500px; background: #000; border-radius: 8px;"></video>
             <div id="videoStatus" style="text-align: center; margin-top: 10px; font-size: 0.9rem; color: #666;">Connecting to stream...</div>
