@@ -1,4 +1,5 @@
-#v1.4 Wifi manager thereading + (BME + ADT75) basic Thermal control loop + Light controller + Lid switch + PWM 1 FAN & 1 HEATER + Brightness control + Calibration logging 
+#v1.4 Wifi connection edited + wb2812 light controller + temp pid control + fan with tacho_pin basic + local host spports
+#todo : ds18b20 temp sensor
 import requests
 import serial
 import time
@@ -10,24 +11,30 @@ from datetime import datetime, timedelta
 import subprocess
 import glob
 
-
+    
 # --- ADD THESE IMPORTS AT TOP ---
 import random 
 # Try importing hardware libraries, fail gracefully if missing
 try:
     import smbus2
     import board
-    import neopixel # Requires: pip install rpi_ws281x adafruit-circuitpython-neopixel
+  # Requires: pip install rpi_ws281x adafruit-circuitpython-neopixel
     HARDWARE_AVAILABLE = True
 except ImportError:
     HARDWARE_AVAILABLE = False
-
+try:
+    from rpi_ws281x import PixelStrip, Color
+    LIGHTS_AVAILABLE = True
+except ImportError:
+    LIGHTS_AVAILABLE = False
 try:
     import bme280 # Requires: pip install RPi.bme280
 except ImportError:
     bme280 = None
 # --- CONFIGURATION ---
-SERVER_URL = "http://192.168.31.236:5000" 
+# SERVER_URL = "http://192.168.31.236:5000"  #while running server in pc
+# SERVER_URL = "http://192.168.31.83:5000" #while running server in pi
+SERVER_URL = "http://localhost:5000" #while running server in pi
 BASE_DIR = "/home/lhr/Robot_Client"
 DIR_RECENT = os.path.join(BASE_DIR, "recent_protocols")
 DIR_TEST = os.path.join(BASE_DIR, "test_protocols")
@@ -42,8 +49,9 @@ for d in [DIR_RECENT, DIR_TEST, LOG_ROOT, DIR_PROTO_LOGS, DIR_CALIB_LOGS]:
     os.makedirs(d, exist_ok=True)
 
 # --- 1. PWM DEVICE WRAPPER ---
+# --- 1. GENERIC PWM DEVICE (For Heater) ---
 class PWMDevice:
-    def __init__(self, pin, freq=100):
+    def __init__(self, pin, freq=2000): #2000Hz is efficient for SoftPWM heaters
         self.pin = pin
         self.freq = freq
         self.pwm = None
@@ -51,12 +59,65 @@ class PWMDevice:
             GPIO.setup(self.pin, GPIO.OUT)
             self.pwm = GPIO.PWM(self.pin, self.freq)
             self.pwm.start(0)
-        except: pass # Sim mode
+        except: pass 
 
     def set_duty(self, duty):
-        # Clamp 0-100
         val = max(0.0, min(100.0, float(duty)))
         if self.pwm: self.pwm.ChangeDutyCycle(val)
+        
+# --- 2. FAN CONTROLLER (With Tacho) ---
+class FanController:
+    def __init__(self, pwm_pin, tacho_pin=None, name="Fan"):
+        self.pwm_pin = pwm_pin
+        self.tacho_pin = tacho_pin
+        self.name = name
+        self.duty_cycle = 0
+        
+        # PWM Setup (Using RPi.GPIO 'Software' PWM to allow independent control)
+        GPIO.setup(self.pwm_pin, GPIO.OUT)
+        self.pwm = GPIO.PWM(self.pwm_pin, 100) # 100Hz is standard for fans
+        self.pwm.start(0)
+
+        # Tachometer Setup
+        self.rpm = 0
+        self._pulse_count = 0
+        self._last_time = time.time()
+        
+        if self.tacho_pin:
+            # Input with Pull-Up (Fans usually pull signal to ground)
+            GPIO.setup(self.tacho_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            try:
+                GPIO.add_event_detect(
+                    self.tacho_pin, 
+                    GPIO.FALLING, 
+                    callback=self._tacho_callback
+                )
+            except RuntimeError as e:
+                print(f"⚠️ Tacho Init Error ({self.name}): {e}")
+
+    def _tacho_callback(self, channel):
+        self._pulse_count += 1
+
+    def set_speed(self, percent):
+        self.duty_cycle = max(0, min(100, percent))
+        self.pwm.ChangeDutyCycle(self.duty_cycle)
+
+    def get_rpm(self):
+        if not self.tacho_pin: return 0
+        
+        current_time = time.time()
+        dt = current_time - self._last_time
+        
+        if dt < 0.5: return self.rpm # Don't update too often
+        
+        # Formula: (Pulses / 2 pulses per rev) * (60s / time elapsed)
+        # Using max(dt, 0.01) to prevent division by zero
+        raw_rpm = (self._pulse_count / 2) * (60 / max(dt, 0.01))
+        self.rpm = int(raw_rpm)
+        
+        self._pulse_count = 0
+        self._last_time = current_time
+        return self.rpm
 
 # --- 2. PID CONTROLLER ---
 class PIDController:
@@ -92,7 +153,6 @@ class PIDController:
         # Positive = Heating required
         # Negative = Cooling required
         return max(-100, min(100, p + i + d))
-    
     
 # --- 1. SENSOR MANAGER CLASS ---
 class SensorManager:
@@ -166,15 +226,15 @@ class SensorManager:
             "adt_temp": self.get_adt75()
         }
 
-# --- 2. LIGHT CONTROLLER (WS2812) ---
-class LightController:
-    def __init__(self, pin=18, num_pixels=8):
+# --- 2. LIGHT CONTROLLER (WS2812) not used since no pwm left --- 
+""" class LightController:
+    def __init__(self, pin=18, num_pixels=6):
         self.active = False
         self.strip = None
         if HARDWARE_AVAILABLE:
             try:
                 # Defaulting to GPIO 18 (PWM0)
-                self.strip = neopixel.NeoPixel(board.D18, num_pixels, brightness=0.5, auto_write=False)
+                self.strip = neopixel.NeoPixel(board.D18, num_pixels, brightness=0.1, auto_write=False,dma=10)
             except: pass
 
     def toggle(self, state):
@@ -184,8 +244,49 @@ class LightController:
         color = (255, 255, 255) if state else (0, 0, 0)
         self.strip.fill(color)
         self.strip.show()
+ """
 
+class LightController:
+    def __init__(self, pin=18, num_pixels=8):
+        self.active = False
+        self.strip = None
+        
+        if LIGHTS_AVAILABLE:
+            try:
+                # LED STRIP CONFIGURATION:
+                LED_COUNT      = num_pixels      # Number of LED pixels.
+                LED_PIN        = pin             # GPIO pin (18 uses PWM!).
+                LED_FREQ_HZ    = 800000          # LED signal frequency in hertz (usually 800khz)
+                LED_DMA        = 10              # DMA channel to use for generating signal (try 10)
+                LED_BRIGHTNESS = 255             # Set to 0 for darkest and 255 for brightest
+                LED_INVERT     = False           # True to invert the signal (when using NPN transistor level shift)
+                LED_CHANNEL    = 0               # set to '1' for GPIOs 13, 19, 41, 45 or 53
 
+                # Create NeoPixel object with appropriate configuration.
+                self.strip = PixelStrip(LED_COUNT, LED_PIN, LED_FREQ_HZ, LED_DMA, LED_INVERT, LED_BRIGHTNESS, LED_CHANNEL)
+                
+                # Intialize the library (must be called once before other functions).
+                self.strip.begin()
+                print("✅ NeoPixel Strip Initialized (rpi_ws281x)")
+                
+            except Exception as e: 
+                print(f"⚠️ Light Init Error: {e}")
+
+    def toggle(self, state):
+        self.active = state
+        if not self.strip: return
+        
+        # Color(Red, Green, Blue) - Adjust specific color here
+        # Example: White = Color(255, 255, 255)
+        color = Color(255, 255, 255) if state else Color(0, 0, 0)
+        
+        try:
+            for i in range(self.strip.numPixels()):
+                self.strip.setPixelColor(i, color)
+            self.strip.show()
+        except RuntimeError as e:
+            # Sometimes happens if accessed too quickly
+            print(f"⚠️ Light Update Error: {e}")
 # --- PIPETTE MANAGER ---
 class PipetteManager:
     def __init__(self, bus_id=1):
@@ -288,33 +389,49 @@ class RobotClient:
             "fan_mode": "Manual",  # "Auto" or "Manual"
             "fan_manual_val": 0,   # User Slider %
             "heater_duty": 0,
-            "fan_duty": 0,
+            "fan_rpm": 0,
+            "heater_fan_rpm": 0,
             "pipettes": self.pipettes.get_state(), # <--- Add to shared state
             
         }
+        self.sync_fail_count = 0
         
-        # --- INIT PWM DEVICES ---
+        
+        # 1. GPIO SETUP
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setwarnings(False)
+        
+        
+        # A. Heater Element (GPIO 12 - Software PWM)
         self.PIN_HEATER = 12
-        self.PIN_FAN = 13
-        self.heater = PWMDevice(self.PIN_HEATER)
-        self.fan = PWMDevice(self.PIN_FAN)
+        self.heater = PWMDevice(self.PIN_HEATER, freq=50)
+    
+        
+        # A. Heater Element (GPIO 12 - Software PWM)
+        self.PIN_HEATER = 12
+        self.heater = PWMDevice(self.PIN_HEATER, freq=50) 
+        
+        # B. Cooling Fan (PWM 13, Tacho 6)
+        self.cooling_fan = FanController(pwm_pin=13, tacho_pin=6, name="Cooling Fan")
+        
+        # C. Heater Fan (PWM 19, Tacho 26)
+        self.heater_fan = FanController(pwm_pin=19, tacho_pin=26, name="Heater Fan")
+        
+        # D. Lights (GPIO 18)
+        self.light = LightController(pin=18, num_pixels=6)
+        
         # --- INIT PID ---
         self.pid = PIDController(kp=5.0, ki=0.05, kd=1.0) # Tune these values!
         
         # Lid
-        self.PIN_LID_SWITCH = 22 # Change to your actual pin
-        GPIO.setup(self.PIN_LID_SWITCH, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        
-        # Add to state
-        # self.state["lid_open"] = False
-        
+        self.PIN_LID_LIM = 22 # Change to your actual pin
+        GPIO.setup(self.PIN_LID_LIM, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+        #sensor and light
         self.sensors = SensorManager()
-        self.lights = LightController(pin=18, num_pixels=12) # Adjust pixel count here
-        
-        # Add to State
-        # self.state["light_on"] = False
-        # self.state["sensor_data"] = {}
-        
+        # GPIO.setup(self.PIN_LIGHT, GPIO.OUT)
+        # GPIO.output(self.PIN_LIGHT, 0)
+              
         self.command_queue = queue.Queue()
         self.start_time = None; self.smoothed_seconds = 0
         self.log_accumulator = []; self.current_session_log_path = None
@@ -324,7 +441,7 @@ class RobotClient:
         # --- 1. CLEANUP OLD LOGS ON STARTUP ---
         self.cleanup_old_logs()
 
-        # GPIO
+        # GPIO reset and pause
         self.PIN_RESET = 17; self.PIN_PAUSE = 27   
         GPIO.setwarnings(False); GPIO.setmode(GPIO.BCM)
         GPIO.setup(self.PIN_RESET, GPIO.OUT); GPIO.setup(self.PIN_PAUSE, GPIO.OUT)
@@ -360,7 +477,7 @@ class RobotClient:
         # SAFETY: If temp sensor fails (0.0) or target is 0, TURN OFF
         if current_temp <= 0.1 or target <= 0:
             self.heater.set_duty(0)
-            self.fan.set_duty(self.state["fan_manual_val"] if self.state["fan_mode"] == "Manual" else 0)
+            self.heater_fan.set_speed(self.state["fan_manual_val"] if self.state["fan_mode"] == "Manual" else 0)
             self.state["heater_duty"] = 0
             return
 
@@ -387,20 +504,28 @@ class RobotClient:
             # In Manual Fan mode, PID only controls Heater (0-100)
             # If PID wanted negative (cooling), heater just stays 0.
 
-        # 5. Write to Hardware
-        self.heater.set_duty(heater_val)
-        self.fan.set_duty(fan_val)
+        if heater_val > 0:
+            self.heater_fan.set_speed(fan_val) # Run heater fan gently to spread heat
+            self.cooling_fan.set_speed(0)
+        else:
+            self.heater_fan.set_speed(0)
+            self.cooling_fan.set_speed(fan_val) # Run cooling fan based on PID
+            
+        # Update State
+        self.state["heater_duty"] = heater_val
+        self.state["fan_rpm"] = self.cooling_fan.get_rpm()
+        self.state["heater_fan_rpm"] = self.heater_fan.get_rpm()
         
-        # 6. Update State for UI
-        self.state["heater_duty"] = int(heater_val)
-        self.state["fan_duty"] = int(fan_val)
         self.state["sensor_data"] = sensors # Ensure latest sensors stored
+        
+        
         
     def toggle_light(self):
         """Toggles WS2812 LEDs."""
         new_state = not self.state["light_on"]
         self.state["light_on"] = new_state
-        self.lights.toggle(new_state)
+        self.light.toggle(new_state)
+        #GPIO.output(self.PIN_LIGHT, new_state)
         self.log(f"💡 Light {'ON' if new_state else 'OFF'}")
         self.sync_with_server() # Push change to server
          
@@ -487,38 +612,140 @@ class RobotClient:
             print(f"WiFi Scan Error: {e}")
             return []   
     
-    def connect_wifi(self, ssid, password):
-        print(f"📡 Attempting to connect to: {ssid}...", flush=True)
+    """ def connect_wifi(self, ssid, password):
+        print(f"📡 Managing WiFi Connection: {ssid}...", flush=True)
         
-        try:
-            # 1. Cleanup: Try to delete existing connection profile for this SSID first
-            # This prevents "Profile already exists" errors or conflicts
-            subprocess.run(
-                ["sudo", "nmcli", "connection", "delete", ssid],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            
-            # 2. Connect: Run with SUDO and capture output for debugging
-            # Using 'capture_output=True' allows us to see the error message if it fails
-            result = subprocess.run(
-                ["sudo", "nmcli", "dev", "wifi", "connect", ssid, "password", password],
-                capture_output=True,
+        # Helper to run nmcli commands cleanly
+        def nmcli_cmd(args):
+            return subprocess.run(
+                ["sudo", "nmcli"] + args, 
+                capture_output=True, 
                 text=True
             )
+
+        try:
+            # 1. ALWAYS DELETE EXISTING PROFILES FOR THIS SSID
+            # This prevents "Secrets were required but not provided" errors.
+            # We don't care if it fails (profile doesn't exist), so we ignore errors.
+            print(f"🧹 Cleaning up old profiles for '{ssid}'...")
+            nmcli_cmd(["connection", "delete", "id", ssid])
             
-            # 3. Check Result
-            if result.returncode == 0:
-                print(f"✅ Successfully connected to {ssid}")
-                return True
-            else:
-                # Print the actual error from nmcli
-                print(f"❌ Connection Failed. Error output:\n{result.stderr}")
-                return False
+            # 2. FRESH CONNECT
+            # This forces nmcli to use the password provided NOW.
+            print(f"🔗 Connecting to '{ssid}'...")
+            res = nmcli_cmd(["dev", "wifi", "connect", ssid, "password", password])
+            
+            # 3. VERIFY SUCCESS
+            if res.returncode == 0:
+                print(f"✅ WiFi Connected to {ssid}!")
                 
+                # Wait 2 seconds for DHCP to assign an IP address
+                time.sleep(2.0)
+                
+                # Check if we actually got an IP
+                ip_check = subprocess.run(["hostname", "-I"], capture_output=True, text=True)
+                new_ip = ip_check.stdout.strip()
+                print(f"🌍 New IP: {new_ip}")
+
+                if not new_ip:
+                    print("⚠️ Warning: Connected but no IP address yet.")
+
+                print("🔄 Restarting Streaming Services...")
+                try:
+                    # Restart services to bind to new IP
+                    subprocess.run(["sudo", "systemctl", "restart", "mediamtx"], check=True)
+                    subprocess.run(["sudo", "systemctl", "restart", "cloudflared"], check=True)
+                    print("✅ Services Restarted")
+                    return True
+                except Exception as e:
+                    print(f"⚠️ Service Restart Warning: {e}")
+                    return True # Still return True because WiFi itself is fine
+            
+            else:
+                # Print the exact error from nmcli to the logs
+                print(f"❌ Connect Failed: {res.stderr.strip()}")
+                return False
+
         except Exception as e:
             print(f"❌ WiFi System Error: {e}")
-            return False        
+            return False    
+         """    
+    def connect_wifi(self, ssid, password):
+        print(f"📡 Connecting to {ssid} (Step-by-Step Method)...", flush=True)
+
+        def run_nmcli(args):
+            # Helper to run nmcli silently
+            return subprocess.run(
+                ["sudo", "nmcli"] + args, 
+                capture_output=True, text=True
+            )
+
+        try:
+            # STEP 1: DELETE OLD GHOST PROFILES
+            # If we don't do this, nmcli might make "SSID-1", "SSID-2" duplicates.
+            print(f"   1. Cleaning old profiles for {ssid}...")
+            # We run this blindly; ignore errors if profile doesn't exist.
+            run_nmcli(["connection", "delete", ssid])
+
+            # STEP 2: CREATE NEW EMPTY PROFILE
+            # We create a specific connection named exactly "ssid"
+            print(f"   2. Creating new profile...")
+            res_add = run_nmcli([
+                "connection", "add", 
+                "type", "wifi", 
+                "ifname", "wlan0", 
+                "con-name", ssid, 
+                "ssid", ssid
+            ])
+            
+            if res_add.returncode != 0:
+                print(f"❌ Failed to add profile: {res_add.stderr}")
+                return False
+
+            # STEP 3: INJECT PASSWORD (NON-INTERACTIVE)
+            # This sets the password directly in the database. No prompts.
+            print(f"   3. Setting password...")
+            res_sec = run_nmcli([
+                "connection", "modify", ssid, 
+                "wifi-sec.key-mgmt", "wpa-psk", 
+                "wifi-sec.psk", password
+            ])
+            
+            if res_sec.returncode != 0:
+                print(f"❌ Failed to set password: {res_sec.stderr}")
+                return False
+
+            # STEP 4: ACTIVATE (CONNECT)
+            # Now we just flip the switch.
+            print(f"   4. Activating connection...")
+            res_up = run_nmcli(["connection", "up", ssid])
+            
+            if res_up.returncode != 0:
+                print(f"❌ Connection Up Failed: {res_up.stderr}")
+                # Clean up the broken profile so we don't leave trash
+                run_nmcli(["connection", "delete", ssid])
+                return False
+
+            # STEP 5: SUCCESS & RESTART SERVICES
+            print(f"✅ Connected to {ssid}!")
+            
+            # Wait a moment for IP address
+            time.sleep(2)
+            
+            print("🔄 Restarting Streaming Services...")
+            try:
+                subprocess.run(["sudo", "systemctl", "restart", "mediamtx"], check=True)
+                subprocess.run(["sudo", "systemctl", "restart", "cloudflared"], check=True)
+                print("✅ Services Restarted")
+                return True
+            except Exception as e:
+                print(f"⚠️ Service Restart Warning: {e}")
+                return True # Wifi is good, so return True
+
+        except Exception as e:
+            print(f"❌ Critical WiFi Error: {e}")
+            return False
+   
     def _find_backlight_path(self):
         """Auto-detects the backlight controller path."""
         # Common locations for Raspberry Pi DSI / GPIO displays
@@ -666,7 +893,7 @@ class RobotClient:
             except: pass
 
     def sync_with_server(self):
-        is_open = GPIO.input(self.PIN_LID_SWITCH) == GPIO.HIGH
+        is_open = GPIO.input(self.PIN_LID_LIM) == GPIO.HIGH
         self.state["lid_open"] = is_open
         self.state["sensor_data"] = self.sensors.get_all()
         line_txt = self.state["current_line"]
@@ -691,13 +918,20 @@ class RobotClient:
             "pipettes": self.state["pipettes"]
         }
         self.log_accumulator = [] 
+        
         try:
-            r = requests.post(f"{SERVER_URL}/pi/sync", json=payload, timeout=0.5)
+            r = requests.post(f"{SERVER_URL}/pi/sync", json=payload, timeout=2.0)
             if r.status_code == 200:
-                if not self.server_connected: self.log("✅ Connected to Server"); self.server_connected = True
+                if not self.server_connected: self.log("✅ Connected to Server")
+                self.server_connected = True
+                self.sync_fail_count = 0 # Reset fail count
                 for cmd in r.json().get("commands", []): self.handle_server_command(cmd)
         except: 
-            if self.server_connected: self.log("⚠️ Lost connection to Server"); self.server_connected = False  
+            self.sync_fail_count += 1
+            # Only go "Offline" if failed 3 times in a row
+            if self.sync_fail_count > 3:
+                if self.server_connected: self.log("⚠️ Lost connection to Server")
+                self.server_connected = False
       
     """ def handle_server_command(self, cmd):
         ev = cmd["event"]
@@ -870,9 +1104,11 @@ class RobotClient:
         last_sync = time.time()
         waiting_for_response = False
         last_pipette_check = 0  # <--- NEW TIMER VARIABLE
-        
+        last_sensor_read = 0  # <--- NEW TIMER
         while True:
-            self.update_thermal_control()
+            # 1. READ SENSORS (Only every 0.5s)
+            if time.time() - last_sensor_read > 0.5:
+                self.update_thermal_control() # This calls sensors.get_all()
             self.calculate_estimate()
             # --- 1. CONTINUOUS PIPETTE SCAN (Every 2 Seconds) ---
             if time.time() - last_pipette_check > 2.0:
@@ -947,7 +1183,8 @@ class RobotClient:
                     elif cmd_type == "CONNECT_WIFI":
                         ssid, pw = data
                         # Run in a thread so the loop doesn't freeze
-                        threading.Thread(target=self.connect_wifi, args=(ssid, pw), daemon=True).start()        
+                        t = threading.Thread(target=self.connect_wifi, args=(ssid, pw), daemon=True)
+                        t.start()      
                     
             except: pass
 
