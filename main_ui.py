@@ -1555,8 +1555,7 @@ class SettingsTray(tk.Frame):
             
             # 2. Check Result
             if c.result:
-                print("⟳ Rebooting...")
-                self.root.quit() # Close UI cleanly first
+                print("⟳ Rebooting...")      
                 subprocess.run(["sudo", "reboot"])
             
         def do_shutdown():
@@ -1570,7 +1569,6 @@ class SettingsTray(tk.Frame):
             # 2. Check Result
             if c.result:
                 print("⏻ Shutting Down...")
-                self.root.quit() # Close UI cleanly first
                 subprocess.run(["sudo", "shutdown", "now"])
 
         # --- BUTTON MAKER ---
