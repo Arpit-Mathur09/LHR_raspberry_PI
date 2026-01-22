@@ -1,7 +1,9 @@
 #v1.4 ProtocolSetupPopup + Running Screen updated (Fan and Sensor Status bar) + Lid open Close + Enhanced Widgets
+# FORCE UI TO USE DISPLAY :0
+import sys
+import os
 import tkinter as tk
 from tkinter import ttk
-import os
 import backend 
 from datetime import datetime
 import math
@@ -9,6 +11,8 @@ import subprocess
 import time
 import functools
 import threading # Required for async scanning
+
+
 # --- DEBUGGING TOOL ---
 def profile(func):
     @functools.wraps(func)
@@ -1530,17 +1534,66 @@ class SettingsTray(tk.Frame):
             
     def show_power(self):
         self.clear_content("Power Options")
-        bf = tk.Frame(self.content, bg=CLR_TRAY); bf.pack(pady=20)
-        def mk_pwr(icon, txt):
-            f = tk.Frame(bf, bg="white", width=260, height=60, highlightbackground="#E0E0E0", highlightthickness=1)
-            f.pack_propagate(False); f.pack(pady=8)
+        
+        # Container Frame
+        bf = tk.Frame(self.content, bg=CLR_TRAY)
+        bf.pack(pady=20)
+
+        # --- ACTION FUNCTIONS WITH POPUP ---
+        def do_sleep():
+            # Sleep usually doesn't need confirmation, but you can add it if you want.
+            print("💤 Turning Screen Off...")
+            subprocess.run(["xset", "-display", ":0", "dpms", "force", "off"])
+            
+        def do_restart():
+            # 1. Ask for Confirmation
+            c = CustomConfirmPopup(self.winfo_toplevel(), 
+                                 "⚠️", 
+                                 "RESTART SYSTEM",
+                                 "Are you sure you want to\nreboot the robot?", 
+                                 420, 280, CLR_WARNING)
+            
+            # 2. Check Result
+            if c.result:
+                print("⟳ Rebooting...")
+                self.root.quit() # Close UI cleanly first
+                subprocess.run(["sudo", "reboot"])
+            
+        def do_shutdown():
+            # 1. Ask for Confirmation
+            c = CustomConfirmPopup(self.winfo_toplevel(), 
+                                 "⏻", 
+                                 "POWER OFF",
+                                 "Are you sure you want to\nshut down completely?", 
+                                 420, 280, CLR_DANGER)
+            
+            # 2. Check Result
+            if c.result:
+                print("⏻ Shutting Down...")
+                self.root.quit() # Close UI cleanly first
+                subprocess.run(["sudo", "shutdown", "now"])
+
+        # --- BUTTON MAKER ---
+        def mk_pwr(icon, txt, command):
+            f = tk.Frame(bf, bg="white", width=260, height=60, 
+                         highlightbackground="#E0E0E0", highlightthickness=1)
+            f.pack_propagate(False)
+            f.pack(pady=8)
+            
             l_i = tk.Label(f, text=icon, font=("Arial", 22), fg="#546E7A", bg="white")
             l_i.pack(side="left", padx=20)
+            
             l_t = tk.Label(f, text=txt, font=("Arial", 12, "bold"), fg="#37474F", bg="white")
             l_t.pack(side="left")
-            for w in [f, l_i, l_t]: w.bind("<Button-1>", lambda e: self.close()) 
-        mk_pwr("☾", "Sleep Mode"); mk_pwr("⟳", "Restart System"); mk_pwr("⏻", "Power Off")
+            
+            # Simple bind: Just run the command. The command itself handles the popup now.
+            for w in [f, l_i, l_t]: 
+                w.bind("<Button-1>", lambda e: command())
 
+        # --- CREATE BUTTONS ---
+        mk_pwr("☾", "Sleep Mode", do_sleep)
+        mk_pwr("⟳", "Restart System", do_restart)
+        mk_pwr("⏻", "Power Off", do_shutdown)
 
     
     def show_sensors(self):
@@ -1665,6 +1718,7 @@ class SettingsTray(tk.Frame):
             w.bind("<Button-1>", go_back)
             
         tk.Label(nav, text=title, font=("Arial", 14, "bold"), fg=CLR_TRAY_TEXT, bg=CLR_TRAY).pack(side="right")
+
 # --- FLOATING BUTTON (Independent Toplevel) ---
 class FloatingSettingsButton(tk.Toplevel):
     def __init__(self, parent, controller):
@@ -1707,16 +1761,17 @@ class CustomPopup(ModalOverlay):
         head_box = tk.Frame(self.f, bg="white"); head_box.pack(pady=(15, 2))
         tk.Label(head_box, text=icon_text, font=("Arial", icon_size), fg=color, bg="white").pack(side="top")
         tk.Label(head_box, text=header, font=("Arial", 20, "bold"), fg=color, bg="white").pack(side="top")
-        tk.Frame(self.f, height=3, bg=color, width=300).pack(pady=8)
+        tk.Frame(self.f, height=3, bg=color, width=300 ,cursor='none').pack(pady=8)
         msg_frame = tk.Frame(self.f, bg="white"); msg_frame.pack(pady=2, padx=15)
         tk.Label(msg_frame, text=message, font=("Arial", 12), bg="white", fg="#444", wraplength=340).pack(anchor="n")
-        btn_f = tk.Frame(self.f, bg="white"); btn_f.pack(side="bottom", pady=20)
-        RoundedButton(btn_f, text="OK", command=self.destroy, width=130, height=45, bg_color=color, hover_color=color).pack()
+        btn_f = tk.Frame(self.f, bg="white", cursor="none"); btn_f.pack(side="bottom", pady=20)
+        RoundedButton(btn_f, text="OK", command=self.destroy, width=130, height=45, bg_color=color, hover_color=color, ).pack()
         self.deiconify(); self.update_idletasks(); self.lift(); self.grab_set()
 
 class CustomConfirmPopup(ModalOverlay):
     def __init__(self, parent, title, header, message, width=420, height=240 ,color=CLR_DANGER ):
         super().__init__(parent); self.result = False
+        #addd cursor none 
         cw, ch = width, height; cx = parent.winfo_width() / 2; cy = parent.winfo_height() / 2
         self.cv.create_rectangle(cx - cw/2 + 6, cy - ch/2 + 6, cx + cw/2 + 6, cy + ch/2 + 6, fill=CLR_SHADOW, outline="")
         self.cv.create_rectangle(cx - cw/2, cy - ch/2, cx + cw/2, cy + ch/2, fill="white", outline=color, width=2)
@@ -1726,9 +1781,9 @@ class CustomConfirmPopup(ModalOverlay):
         tk.Label(head_box, text=header, font=("Arial", 18, "bold"), fg=color, bg="white").pack(side="top")
         tk.Frame(self.f, height=2, bg=color, width=300).pack(pady=5)
         tk.Label(self.f, text=message, font=("Arial", 12), bg="white", fg="#444", wraplength=cw-40).pack(pady=5)
-        btn_f = tk.Frame(self.f, bg="white"); btn_f.pack(side="bottom", pady=20)
-        RoundedButton(btn_f, text="CANCEL", command=self.on_cancel, width=120, height=50, bg_color="#9E9E9E", hover_color="#757575").pack(side="left", padx=15)
-        RoundedButton(btn_f, text="CONFIRM", command=self.on_confirm, width=120, height=50, bg_color=color).pack(side="left", padx=15)
+        btn_f = tk.Frame(self.f, bg="white", cursor="none"); btn_f.pack(side="bottom", pady=20)
+        RoundedButton(btn_f, text="CANCEL", command=self.on_cancel, width=120, height=50, bg_color="#9E9E9E", hover_color="#757575",).pack(side="left", padx=15)
+        RoundedButton(btn_f, text="CONFIRM", command=self.on_confirm, width=120, height=50, bg_color=color).pack(side="left", padx=15,)
         self.deiconify(); self.lift(); self.grab_set(); self.wait_window()
         
     def on_confirm(self): self.result = True; self.destroy()
@@ -3008,7 +3063,9 @@ class Running(tk.Frame):
         
         RoundedButton(footer, text="STOP", command=self.cancel_run, width=130, height=55, bg_color=CLR_DANGER, hover_color=CLR_DANGER_HOVER).grid(row=0, column=2, sticky="e")
 
-    def on_fan_change(self, val): self.c.backend.state["fan_manual_val"] = int(val)
+    def on_fan_change(self, val): 
+        self.c.backend.state["fan_manual_val"] = int(val)
+    
     def cancel_run(self):
         confirm = CustomConfirmPopup(self.c, "⏹️", "STOP PROTOCOL", "Are you sure you want to abort?")
         if confirm.result: self.c.backend.ui_stop()
