@@ -14,9 +14,43 @@ KIOSK SETUP
 -apt update && apt upgrade -y
 - Install required packages should be install in root
     sudo apt install --no-install-recommends xserver-xorg x11-xserver-utils xinit openbox chromium unclutter
+    -- sudo apt-get update && sudo apt-get install -y libatlas-base-dev libopenjp2-7 libtiff5 libgl1-mesa-glx
+    --further more in clickup task
 
 - Installation of fonts: sudo apt install fonts-unifont fonts-symbola
 
+cloudflare 
+ -cloudflared tunnel create pi-tunnel 
+    Tunnel credentials written to /home/lhr/.cloudflared/861a0c8c-8b8a-483f-976d-63bccca24461.json. cloudflared chose this file based on where your origin certificate was found. Keep this file secret. To revoke these credentials, delete the tunnel.
+    Created tunnel pi-tunnel with id 861a0c8c-8b8a-483f-976d-63bccca24461
+-Kimoteh377@noihse.com cloufare temp account 
+
+▶️TO run (assuming working directory is /home/lhr/Robot_Client)
+- sudo startx /home/lhr/Robot_Client/env/bin/python3 /home/lhr/Robot_Client/main_ui.py
+- cd /opt/mediamtx && ./mediamtx
+- source /home/lhr/Robot_Client/env/bin/activate &&python3 /home/lhr/Robot_Client/server.py 
+
+**Automatic Startup (Recommended)**
+- All services auto-start on boot (mediamtx, robot-flask, cloudflared, main_ui)
+- Just reboot: `sudo reboot`
+
+
+**Status Check**
+```bash
+sudo systemctl status mediamtx
+sudo systemctl status robot-flask
+sudo systemctl status cloudflared
+```
+
+**Access Dashboard**
+- Local: http://192.168.31.83:5000 (user: admin, pass: strongpassword)
+- Remote: Via cloudflare tunnel ([LINK](https://app.lhrpi.dpdns.org/))
+(Remote works only pi is working and connected to internet)
+
+*NOTE For graceful shutdown for pi for future
+-GPIO 16
+    sudo nano /boot/firmware/config.txt
+    add this- dtoverlay=gpio-shutdown,gpio_pin=16,gpio_pull=up
 
 ⚠️ Important Note:
 - We write pyserial in this file, even though we import it as import serial in Python.
