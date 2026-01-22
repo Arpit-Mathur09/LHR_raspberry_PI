@@ -1,4 +1,4 @@
-#v1.4 ProtocolSetupPopup + Running Screen updated (Fan and Sensor Status bar) + Lid open Close + Enhanced Widgets
+#v1.5 Addded power button functionality with confirm popup
 # FORCE UI TO USE DISPLAY :0
 import sys
 import os
@@ -1345,7 +1345,7 @@ class SettingsTray(tk.Frame):
     def show_about(self):
         # UPDATED TO V1.4
         popup = CustomPopup(self.winfo_toplevel(), "About", "SYSTEM INFO", 
-                            "Liquid Handler v1.4\nRunning on Raspberry Pi 4", 
+                            "Liquid Handler v1.5\nRunning on Raspberry Pi 4", 
                             CLR_PRIMARY, "ℹ")
         self.wait_window(popup)
 
@@ -2061,7 +2061,7 @@ class Home(tk.Frame):
         
         tk.Label(brand_frame, text="LIQUID", font=("Segoe UI", 18, "bold"), fg=CLR_PRIMARY, bg=left_bg).pack(anchor="w")
         tk.Label(brand_frame, text="HANDLER", font=("Segoe UI", 18, "bold"), fg="#455A64", bg=left_bg).pack(anchor="w")
-        tk.Label(brand_frame, text="v1.4", font=("Segoe UI", 10, "bold"), fg="#B0BEC5", bg=left_bg).pack(anchor="w", pady=(2,0))
+        tk.Label(brand_frame, text="v1.5", font=("Segoe UI", 10, "bold"), fg="#B0BEC5", bg=left_bg).pack(anchor="w", pady=(2,0))
 
         # 2. Buttons (Vertically Centered)
         btn_container = tk.Frame(left_panel, bg=left_bg)
@@ -2250,7 +2250,7 @@ class Home(tk.Frame):
         brand_frame.pack(anchor="center", pady=(40, 20))
         
         tk.Label(brand_frame, text="LIQUID HANDLER", font=("Segoe UI", 16, "bold"), fg=CLR_PRIMARY, bg=left_bg).pack()
-        tk.Label(brand_frame, text="v1.4 System Ready", font=("Segoe UI", 10), fg="#90A4AE", bg=left_bg).pack(pady=(2,0))
+        tk.Label(brand_frame, text="v1.5 System Ready", font=("Segoe UI", 10), fg="#90A4AE", bg=left_bg).pack(pady=(2,0))
 
         # 2. Buttons
         btn_container = tk.Frame(left_panel, bg=left_bg)
