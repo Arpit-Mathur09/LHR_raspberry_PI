@@ -242,9 +242,13 @@ def get_status():
 @app.route('/logs')
 def get_logs():
     if not os.path.exists(SYSTEM_LOG_FILE): return "Waiting for logs..."
-    with open(SYSTEM_LOG_FILE, 'r', encoding="utf-8") as f:
-        lines = f.readlines()
-        return "".join(lines[-50:])
+    if not os.path.isfile(SYSTEM_LOG_FILE): return "Log file is invalid (directory exists)"
+    try:
+        with open(SYSTEM_LOG_FILE, 'r', encoding="utf-8") as f:
+            lines = f.readlines()
+            return "".join(lines[-50:])
+    except Exception as e:
+        return f"Error reading logs: {str(e)}"
 
 # --- PI INTERACTION ROUTES ---
 @app.route('/download/<filename>')
