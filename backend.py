@@ -227,27 +227,8 @@ class SensorManager:
         }
 
 # --- 2. LIGHT CONTROLLER (WS2812) not used since no pwm left --- 
-""" class LightController:
-    def __init__(self, pin=18, num_pixels=6):
-        self.active = False
-        self.strip = None
-        if HARDWARE_AVAILABLE:
-            try:
-                # Defaulting to GPIO 18 (PWM0)
-                self.strip = neopixel.NeoPixel(board.D18, num_pixels, brightness=0.1, auto_write=False,dma=10)
-            except: pass
-
-    def toggle(self, state):
-        self.active = state
-        if not self.strip: return
-        
-        color = (255, 255, 255) if state else (0, 0, 0)
-        self.strip.fill(color)
-        self.strip.show()
- """
-
 class LightController:
-    def __init__(self, pin=18, num_pixels=8):
+    def __init__(self, pin=18, num_pixels=20):
         self.active = False
         self.strip = None
         
@@ -258,7 +239,7 @@ class LightController:
                 LED_PIN        = pin             # GPIO pin (18 uses PWM!).
                 LED_FREQ_HZ    = 800000          # LED signal frequency in hertz (usually 800khz)
                 LED_DMA        = 10              # DMA channel to use for generating signal (try 10)
-                LED_BRIGHTNESS = 255             # Set to 0 for darkest and 255 for brightest
+                LED_BRIGHTNESS = 180             # Set to 0 for darkest and 255 for brightest
                 LED_INVERT     = False           # True to invert the signal (when using NPN transistor level shift)
                 LED_CHANNEL    = 0               # set to '1' for GPIOs 13, 19, 41, 45 or 53
 
@@ -933,26 +914,7 @@ class RobotClient:
                 if self.server_connected: self.log("⚠️ Lost connection to Server")
                 self.server_connected = False
       
-    """ def handle_server_command(self, cmd):
-        ev = cmd["event"]
-        printf(f"DEBUG: Handling server command: {ev}", flush=True)
-        if ev == "PAUSE": self.command_queue.put(("REMOTE_PAUSE", None))
-        elif ev == "RESUME": self.command_queue.put(("REMOTE_RESUME", None))
-        elif ev == "CLEAR": self.command_queue.put(("REMOTE_STOP", None))
-        elif ev == "NEW_FILE": self.command_queue.put(("DOWNLOAD_AND_RUN", (cmd["filename"], "Remote"))) 
-        elif ev == "SERIAL_SEND":
-            if self.ser: self.log(f"TX (Remote): {cmd['data']}"); self.ser.write((cmd["data"] + "\n").encode())
-        # --- CALIB START (Remote) ---
-        elif ev == "CALIB_START": 
-            self.set_calibration_mode(True, "Remote")
-            if self.ser: 
-                self.ser.write(b"T00\n")
-        elif ev == "CALIB_END": 
-            self.set_calibration_mode(False, None)
-        elif ev == "SET_THERMAL":
-            # Pass the dictionary data straight to the queue
-            self.command_queue.put(("SET_THERMAL", cmd["data"]))
- """
+
  
     def handle_server_command(self, cmd):
         # DEBUG: Print every command received to verify connection
@@ -995,7 +957,28 @@ class RobotClient:
                 self.ser.write((data + "\n").encode())
         elif ev == "CALIB_START": 
             self.set_calibration_mode(True, "Remote")
-            if self.ser: self.ser.write(b"T00\n")
+            if self.ser: 
+                # --- DYNAMIC PIPETTE CALIBRATION COMMAND ---
+                pips = self.state.get("pipettes", {})
+                left_attached = pips.get("left", {}).get("found", False)
+                right_attached = pips.get("right", {}).get("found", False)
+                
+                print(f"Calib Started Function - Left: {left_attached}, Right: {right_attached}")
+                
+                # Priority: Left (P1), then Right (P2)
+                # Use self.ser.write() to send to the Pico directly
+                if left_attached and right_attached:
+                    # If both, send T00 P1 (or your preferred logic)
+                    self.ser.write(b"T00 P1\n") 
+                    
+                elif left_attached:
+                    self.ser.write(b"T00 P1\n")
+                    
+                elif right_attached:
+                    self.ser.write(b"T00 P2\n")
+                    
+                else:
+                    self.ser.write(b"T00\n")
         elif ev == "CALIB_END": 
             self.set_calibration_mode(False, None)
             
