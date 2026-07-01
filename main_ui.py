@@ -3,9 +3,9 @@
 import sys
 import os
 import tkinter as tk
-from tkinter import ttk
+from   tkinter import ttk
 import backend 
-from datetime import datetime
+from   datetime import datetime
 import math
 import subprocess
 import time
@@ -68,6 +68,9 @@ CLR_TILE_BG = "#FFFFFF"      # Pure White Cards
 CLR_TILE_BORDER = "#DAE0E5"  # Subtle Border color
 CLR_TILE_SHADOW = "#CFD8DC"  # Bottom border "Shadow"
 CLR_ACCENT_BG = "#E3F2FD"  # <--- THIS WAS MISSING (Light Blue for Active Tiles)
+
+
+
 # --- ROUNDED BUTTON ---
 class RoundedButton(tk.Canvas):
     def __init__(self, parent, text, command, width=120, height=50, radius=20, 
@@ -1806,9 +1809,10 @@ class CalibrationBlockerPopup(ModalOverlay):
 class CalibrationStatusPopup(ModalOverlay):
     def __init__(self, parent):
         super().__init__(parent)
+        self.app = parent # Save reference to KioskApp to access the backend
         
-        # Match CustomConfirmPopup size
-        cw, ch = 420, 240 
+        # Increased height from 240 to 290 to make room for the Stop button
+        cw, ch = 420, 290 
         cx = parent.winfo_width() / 2
         cy = parent.winfo_height() / 2
         
@@ -1835,17 +1839,39 @@ class CalibrationStatusPopup(ModalOverlay):
         
         # Subtitle
         self.lbl_desc = tk.Label(self.f, text="Please wait while the robot finds home.", font=("Arial", 12), bg="white", fg="#555")
-        self.lbl_desc.pack(pady=(15, 15))
+        self.lbl_desc.pack(pady=(15, 10))
         
-        # Spinner
+        # --- SPINNER & BUTTON CONTAINER ---
         anim = tk.Frame(self.f, bg="white")
         anim.pack(pady=0)
+        
         self.spinner = HourglassSpinner(anim, size=32, bg="white", color=CLR_PRIMARY)
         self.spinner.pack()
+        
+        # The New Emergency Stop Button
+        self.btn_stop = RoundedButton(anim, text="STOP", width=120, height=40, 
+                                      bg_color=CLR_DANGER, hover_color=CLR_DANGER_HOVER, 
+                                      command=self.emergency_stop)
+        self.btn_stop.pack(pady=(15, 0))
         
         self.deiconify()
         self.update_idletasks()
         self.lift()
+
+    def emergency_stop(self):
+        print("🛑 Calibration Aborted - Resetting Pico...")
+        
+        # 1. Trigger  self.hard_reset_pico() in backend.py
+        self.app.backend.hard_reset_pico()
+        
+        # 2. Force Calibration Mode OFF
+        self.app.backend.set_calibration_mode(False, None)
+        
+        # 3. Force UI to Home Screen
+        self.app.show_frame("Home")
+        
+        # 4. Destroy popup
+        self.destroy()
 
     def update_info(self, status):
         # Update Visuals based on State
@@ -1861,7 +1887,7 @@ class CalibrationStatusPopup(ModalOverlay):
             self.lbl_desc.config(text="Moving to calibration point...")
             self.cv.itemconfig(self.border_id, outline=CLR_WARNING)
             self.spinner.color = CLR_WARNING
-
+            
 # --- MAIN APP ---
 class KioskApp(tk.Tk):
     def __init__(self):
@@ -2222,6 +2248,7 @@ class Home(tk.Frame):
             self.c.show_frame("Calibrate")
    """          
 
+
 class Home(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent, bg=CLR_BG)
@@ -2406,6 +2433,9 @@ class Home(tk.Frame):
             self.c.wait_window(popup); return
         else:
             self.c.show_frame("Calibrate")      
+   # Inside your Home class or SettingsTray:
+    def view_logs(self):
+        LogViewerPopup(self.c)
             
 class Calibrate(tk.Frame):
     def __init__(self, parent, controller):
@@ -2470,9 +2500,24 @@ class Calibrate(tk.Frame):
             self.lbl_x.config(text="X : 0.0"); self.lbl_y.config(text="Y : 0.0"); self.lbl_z1.config(text="Z1: 0.0"); self.lbl_z2.config(text="Z2: 0.0")
             for k in self.c.offsets: self.c.offsets[k].set(0.0)
             return
+        
         self.c.backend.set_calibration_mode(True, "User")
         self.c.backend.sync_with_server() 
-        self.c.backend.ui_send_gcode("T00")
+        
+        # --- DYNAMIC PIPETTE CALIBRATION COMMAND ---
+        pips = self.c.backend.state.get("pipettes", {})
+        left_attached = pips.get("left", {}).get("found", False)
+        right_attached = pips.get("right", {}).get("found", False)
+        
+        # Priority: Left (P1), then Right (P2)
+        if left_attached and right_attached:
+            self.c.backend.ui_send_gcode("T00") # Fallback just in case
+        elif left_attached:
+            self.c.backend.ui_send_gcode("T00 P1")
+        elif right_attached:
+            self.c.backend.ui_send_gcode("T00 P2")
+        else:
+            self.c.backend.ui_send_gcode("T00") # Fallback just in case
         self.c.update() 
         self.lbl_x.config(text="X : 0.0"); self.lbl_y.config(text="Y : 0.0"); self.lbl_z1.config(text="Z1: 0.0"); self.lbl_z2.config(text="Z2: 0.0")
         for k in self.c.offsets: self.c.offsets[k].set(0.0)
