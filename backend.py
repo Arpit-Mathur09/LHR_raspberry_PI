@@ -1,435 +1,106 @@
-#v1.4 Wifi connection edited + wb2812 light controller + temp pid control + fan with tacho_pin basic + local host spports
-#todo : ds18b20 temp sensor
-import requests
-import serial
-import time
+# backend.py
 import os
-import threading
+import time
 import queue
-import RPi.GPIO as GPIO
-from datetime import datetime, timedelta
-import subprocess
+import serial
+import threading
 import glob
+from datetime import datetime
 
-    
-# --- ADD THESE IMPORTS AT TOP ---
-import random 
-# Try importing hardware libraries, fail gracefully if missing
-try:
-    import smbus2
-    import board
-  # Requires: pip install rpi_ws281x adafruit-circuitpython-neopixel
-    HARDWARE_AVAILABLE = True
-except ImportError:
-    HARDWARE_AVAILABLE = False
-try:
-    from rpi_ws281x import PixelStrip, Color
-    LIGHTS_AVAILABLE = True
-except ImportError:
-    LIGHTS_AVAILABLE = False
-try:
-    import bme280 # Requires: pip install RPi.bme280
-except ImportError:
-    bme280 = None
-# --- CONFIGURATION ---
-# SERVER_URL = "http://192.168.31.236:5000"  #while running server in pc
-# SERVER_URL = "http://192.168.31.83:5000" #while running server in pi
-SERVER_URL = "http://localhost:5000" #while running server in pi
+# Modular local imports
+from hardware import (
+    GPIO,
+    PWMDevice,
+    FanController,
+    PIDController,
+    SensorManager,
+    LightController,
+    PipetteManager,
+    BacklightController,
+)
+from network_interface import HttpNetworkInterface
+
 BASE_DIR = "/home/lhr/Robot_Client"
 DIR_RECENT = os.path.join(BASE_DIR, "recent_protocols")
 DIR_TEST = os.path.join(BASE_DIR, "test_protocols")
-
-# --- LOG DIRECTORIES ---
 LOG_ROOT = os.path.join(BASE_DIR, "logs")
 DIR_PROTO_LOGS = os.path.join(LOG_ROOT, "protocol_logs")
 DIR_CALIB_LOGS = os.path.join(LOG_ROOT, "calibration_logs")
 
-# Ensure all exist
+# Initialize directories immediately
 for d in [DIR_RECENT, DIR_TEST, LOG_ROOT, DIR_PROTO_LOGS, DIR_CALIB_LOGS]: 
     os.makedirs(d, exist_ok=True)
 
-# --- 1. PWM DEVICE WRAPPER ---
-# --- 1. GENERIC PWM DEVICE (For Heater) ---
-class PWMDevice:
-    def __init__(self, pin, freq=2000): #2000Hz is efficient for SoftPWM heaters
-        self.pin = pin
-        self.freq = freq
-        self.pwm = None
-        try:
-            GPIO.setup(self.pin, GPIO.OUT)
-            self.pwm = GPIO.PWM(self.pin, self.freq)
-            self.pwm.start(0)
-        except: pass 
-
-    def set_duty(self, duty):
-        val = max(0.0, min(100.0, float(duty)))
-        if self.pwm: self.pwm.ChangeDutyCycle(val)
-        
-# --- 2. FAN CONTROLLER (With Tacho) ---
-class FanController:
-    def __init__(self, pwm_pin, tacho_pin=None, name="Fan"):
-        self.pwm_pin = pwm_pin
-        self.tacho_pin = tacho_pin
-        self.name = name
-        self.duty_cycle = 0
-        
-        # PWM Setup (Using RPi.GPIO 'Software' PWM to allow independent control)
-        GPIO.setup(self.pwm_pin, GPIO.OUT)
-        self.pwm = GPIO.PWM(self.pwm_pin, 100) # 100Hz is standard for fans
-        self.pwm.start(0)
-
-        # Tachometer Setup
-        self.rpm = 0
-        self._pulse_count = 0
-        self._last_time = time.time()
-        
-        if self.tacho_pin:
-            # Input with Pull-Up (Fans usually pull signal to ground)
-            GPIO.setup(self.tacho_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-            try:
-                GPIO.add_event_detect(
-                    self.tacho_pin, 
-                    GPIO.FALLING, 
-                    callback=self._tacho_callback
-                )
-            except RuntimeError as e:
-                print(f"⚠️ Tacho Init Error ({self.name}): {e}")
-
-    def _tacho_callback(self, channel):
-        self._pulse_count += 1
-
-    def set_speed(self, percent):
-        self.duty_cycle = max(0, min(100, percent))
-        self.pwm.ChangeDutyCycle(self.duty_cycle)
-
-    def get_rpm(self):
-        if not self.tacho_pin: return 0
-        
-        current_time = time.time()
-        dt = current_time - self._last_time
-        
-        if dt < 0.5: return self.rpm # Don't update too often
-        
-        # Formula: (Pulses / 2 pulses per rev) * (60s / time elapsed)
-        # Using max(dt, 0.01) to prevent division by zero
-        raw_rpm = (self._pulse_count / 2) * (60 / max(dt, 0.01))
-        self.rpm = int(raw_rpm)
-        
-        self._pulse_count = 0
-        self._last_time = current_time
-        return self.rpm
-
-# --- 2. PID CONTROLLER ---
-class PIDController:
-    def __init__(self, kp=2.0, ki=0.1, kd=0.5):
-        self.kp = kp; self.ki = ki; self.kd = kd
-        self.target = 0.0
-        self.prev_error = 0.0
-        self.integral = 0.0
-        self.last_time = time.time()
-        
-    def update(self, current_temp):
-        now = time.time()
-        dt = now - self.last_time
-        if dt <= 0: return 0
-        
-        error = self.target - current_temp
-        
-        # Proportional
-        p = self.kp * error
-        
-        # Integral (with anti-windup)
-        self.integral += error * dt
-        self.integral = max(-50, min(50, self.integral)) # Clamp I term
-        i = self.ki * self.integral
-        
-        # Derivative
-        d = self.kd * ((error - self.prev_error) / dt)
-        
-        self.prev_error = error
-        self.last_time = now
-        
-        # Output (-100 to 100)
-        # Positive = Heating required
-        # Negative = Cooling required
-        return max(-100, min(100, p + i + d))
-    
-# --- 1. SENSOR MANAGER CLASS ---
-class SensorManager:
-    def __init__(self):
-        self.bus = None
-        self.bme_address = 0x76 # Default I2C address (sometimes 0x77)
-        
-        try:
-            # Initialize I2C Bus
-            self.bus = smbus2.SMBus(1)
-            
-            # Load BME280 Calibration Parameters (Critical for accuracy)
-            if bme280:
-                self.bme_calibration = bme280.load_calibration_params(self.bus, self.bme_address)
-        except Exception as e:
-            print(f"⚠️ Sensor Init Error: {e}")
-
-    def get_cpu_temp(self):
-        try:
-            with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
-                return round(int(f.read()) / 1000.0, 1)
-        except: return 0.0
-
-    def get_cpu_usage(self):
-        try:
-            with open("/proc/loadavg", "r") as f:
-                load = float(f.read().split()[0])
-            return min(100, round((load / 4.0) * 100, 1))
-        except: return 0.0
-
-    
-
-    def get_bme280(self):
-        # REAL READING LOGIC
-        if not self.bus or not bme280:
-            # Fallback if disconnected
-            return {"temp": 0, "hum": 0, "press": 0}
-            
-        try:
-            # Read single sample
-            data = bme280.sample(self.bus, self.bme_address, self.bme_calibration)
-            return {
-                "temp": round(data.temperature, 1),
-                "hum": round(data.humidity, 1),
-                "press": round(data.pressure, 1)
-            }
-        except Exception:
-            # If read fails (e.g. loose wire), return 0
-            return {"temp": 0, "hum": 0, "press": 0}
-
-    def get_adt75(self):
-        # ADT75 (Address 0x48)
-        if not self.bus: return 0.0
-        try:
-            data = self.bus.read_i2c_block_data(0x48, 0, 2)
-            val = (data[0] << 8) | data[1]
-            val >>= 4
-            return val * 0.0625
-        except: return 0.0
-
-    def get_all(self):
-        bme = self.get_bme280()
-        return {
-            "cpu_temp": self.get_cpu_temp(),
-            "cpu_load": self.get_cpu_usage(),
-            
-            
-            "bme_temp": bme["temp"],
-            "bme_hum": bme["hum"],
-            "bme_press": bme["press"],
-            "adt_temp": self.get_adt75()
-        }
-
-# --- 2. LIGHT CONTROLLER (WS2812) not used since no pwm left --- 
-class LightController:
-    def __init__(self, pin=18, num_pixels=20):
-        self.active = False
-        self.strip = None
-        
-        if LIGHTS_AVAILABLE:
-            try:
-                # LED STRIP CONFIGURATION:
-                LED_COUNT      = num_pixels      # Number of LED pixels.
-                LED_PIN        = pin             # GPIO pin (18 uses PWM!).
-                LED_FREQ_HZ    = 800000          # LED signal frequency in hertz (usually 800khz)
-                LED_DMA        = 10              # DMA channel to use for generating signal (try 10)
-                LED_BRIGHTNESS = 180             # Set to 0 for darkest and 255 for brightest
-                LED_INVERT     = False           # True to invert the signal (when using NPN transistor level shift)
-                LED_CHANNEL    = 0               # set to '1' for GPIOs 13, 19, 41, 45 or 53
-
-                # Create NeoPixel object with appropriate configuration.
-                self.strip = PixelStrip(LED_COUNT, LED_PIN, LED_FREQ_HZ, LED_DMA, LED_INVERT, LED_BRIGHTNESS, LED_CHANNEL)
-                
-                # Intialize the library (must be called once before other functions).
-                self.strip.begin()
-                print("✅ NeoPixel Strip Initialized (rpi_ws281x)")
-                
-            except Exception as e: 
-                print(f"⚠️ Light Init Error: {e}")
-
-    def toggle(self, state):
-        self.active = state
-        if not self.strip: return
-        
-        # Color(Red, Green, Blue) - Adjust specific color here
-        # Example: White = Color(255, 255, 255)
-        color = Color(255, 255, 255) if state else Color(0, 0, 0)
-        
-        try:
-            for i in range(self.strip.numPixels()):
-                self.strip.setPixelColor(i, color)
-            self.strip.show()
-        except RuntimeError as e:
-            # Sometimes happens if accessed too quickly
-            print(f"⚠️ Light Update Error: {e}")
-# --- PIPETTE MANAGER ---
-class PipetteManager:
-    def __init__(self, bus_id=1):
-        self.bus_id = bus_id
-        # Define structure
-        self.slots = {
-            "left": {"addr": 0x50, "name": "Slot 1", "model": None, "id": None, "found": False},
-            "right": {"addr": 0x51, "name": "Slot 2", "model": None, "id": None, "found": False}
-        }
-        # Initial scan
-        self.scan_pipettes()
-
-    def read_string(self, bus, addr, start_mem, length):
-        """Reads ASCII string from EEPROM."""
-        try:
-            bus.write_byte(addr, start_mem) # Set memory pointer
-            chars = []
-            for i in range(length):
-                byte = bus.read_byte(addr)
-                if byte != 0xFF and 32 <= byte <= 126: chars.append(chr(byte))
-            return "".join(chars).strip()
-        except: return None
-
-    def scan_pipettes(self):
-        """Scans and returns TRUE if something changed."""
-        changed = False
-        
-        try:
-            bus = smbus2.SMBus(self.bus_id)
-        except: return False
-
-        for key, slot in self.slots.items():
-            addr = slot["addr"]
-            was_found = slot["found"]
-            
-            try:
-                # 1. Ping the device
-                bus.write_quick(addr)
-                
-                # 2. Device exists. Read Manufacturing String to confirm validity.
-                mfg = self.read_string(bus, addr, 0x00, 8)
-                
-                if mfg and "opentron" in mfg.lower():
-                    # Valid Pipette Detected
-                    if not was_found:
-                        # NEW ATTACHMENT
-                        serial = self.read_string(bus, addr, 0x30, 20)
-                        model = self.read_string(bus, addr, 0x60, 20)
-                        
-                        slot["found"] = True
-                        slot["id"] = serial if serial else "Unknown ID"
-                        slot["model"] = model if model else "Unknown Model"
-                        print(f"✅ Pipette Attached {slot['name']}: {slot['model']}")
-                        changed = True
-                else:
-                    # Device at address, but garbage data (or I2C noise)
-                    if was_found:
-                        print(f"⚠️ Pipette Error {slot['name']} (Read Fail)")
-                        slot["found"] = False
-                        slot["id"] = None; slot["model"] = None
-                        changed = True
-
-            except OSError:
-                # 3. Device NOT responding (Removed)
-                if was_found:
-                    print(f"❌ Pipette Removed {slot['name']}")
-                    slot["found"] = False
-                    slot["id"] = None; slot["model"] = None
-                    changed = True
-                    
-        bus.close()
-        return changed
-
-    def get_state(self):
-        return {k: v.copy() for k, v in self.slots.items()}
 
 class RobotClient:
     def __init__(self):
-        self.pipettes = PipetteManager() # <--- Initialize here
+        self.DIR_RECENT = DIR_RECENT
+        self.DIR_TEST = DIR_TEST
+        
+        # Initialize low-level GPIO layout first
+        self.PIN_LID_LIM = 22
+        self.PIN_RESET = 17
+        self.PIN_PAUSE = 27
+        self._init_gpio_pins()
+        
+        # Construct hardware modules
+        self.pipettes = PipetteManager()
+        self.sensors = SensorManager()
+        self.heater = PWMDevice(pin=12, freq=50)
+        self.cooling_fan = FanController(pwm_pin=13, tacho_pin=6, name="Cooling Fan")
+        self.heater_fan = FanController(pwm_pin=19, tacho_pin=26, name="Heater Fan")
+        self.light = LightController(pin=18, num_pixels=6)
+        self.pid = PIDController(kp=5.0, ki=0.05, kd=1.0)
+        self.backlight = BacklightController()
+        self.server_connected = False
+        self.sync_fail_count = 0
+        
+        # Generate internal state template structure
         self.state = {
             "status": "Idle", "filename": "None", "progress": 0,
             "current_line": "Ready", "current_desc": "", "logs": [],            
             "est": "--:--:--:--", "connection": "Offline",
             "stop_reason": None, "pause_reason": None, "error_msg": None, 
             "completed": False, "started_by": "Unknown", "just_started": False,
-            
-            # --- CALIBRATION STATE ---
-            "calibration_active": False,
-            "calibration_source": None,
-            "calib_status": "Idle", 
-            "is_calibrated": False,
-           
-            #lid and light and sensor 
-            "lid_open": False,    # Lid Switch State    
-            "light_on": False,    # WS2812 Light State
-            "sensor_data": {},    # Latest Sensor Readings
-            
-            # NEW TEMP STATE
-            "target_temp": 0,      # User Setpoint
-            "fan_mode": "Manual",  # "Auto" or "Manual"
-            "fan_manual_val": 0,   # User Slider %
-            "heater_duty": 0,
-            "fan_rpm": 0,
-            "heater_fan_rpm": 0,
-            "pipettes": self.pipettes.get_state(), # <--- Add to shared state
-            
+            "calibration_active": False, "calibration_source": None, "calib_status": "Idle", "is_calibrated": False,
+            "lid_open": False, "light_on": False, 
+            "sensor_data": {},    # Initialized as empty dict to maintain memory pointer
+            "target_temp": 0, "fan_mode": "Manual", "fan_manual_val": 0,   
+            "heater_duty": 0, "fan_rpm": 0, "heater_fan_rpm": 0,
+            "pipettes": self.pipettes.get_state(),
         }
-        self.sync_fail_count = 0
         
-        
-        # 1. GPIO SETUP
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setwarnings(False)
-        
-        
-        # A. Heater Element (GPIO 12 - Software PWM)
-        self.PIN_HEATER = 12
-        self.heater = PWMDevice(self.PIN_HEATER, freq=50)
-    
-        
-        # A. Heater Element (GPIO 12 - Software PWM)
-        self.PIN_HEATER = 12
-        self.heater = PWMDevice(self.PIN_HEATER, freq=50) 
-        
-        # B. Cooling Fan (PWM 13, Tacho 6)
-        self.cooling_fan = FanController(pwm_pin=13, tacho_pin=6, name="Cooling Fan")
-        
-        # C. Heater Fan (PWM 19, Tacho 26)
-        self.heater_fan = FanController(pwm_pin=19, tacho_pin=26, name="Heater Fan")
-        
-        # D. Lights (GPIO 18)
-        self.light = LightController(pin=18, num_pixels=6)
-        
-        # --- INIT PID ---
-        self.pid = PIDController(kp=5.0, ki=0.05, kd=1.0) # Tune these values!
-        
-        # Lid
-        self.PIN_LID_LIM = 22 # Change to your actual pin
-        GPIO.setup(self.PIN_LID_LIM, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-
-        #sensor and light
-        self.sensors = SensorManager()
-        # GPIO.setup(self.PIN_LIGHT, GPIO.OUT)
-        # GPIO.output(self.PIN_LIGHT, 0)
-              
         self.command_queue = queue.Queue()
+        self.network = HttpNetworkInterface(self)
+        
         self.start_time = None; self.smoothed_seconds = 0
         self.log_accumulator = []; self.current_session_log_path = None
-        self.server_connected = False; self.expect_reset = False
+        self.expect_reset = False
         self.connection_time = time.time(); self.grace_period = 3.0 
 
-        # --- 1. CLEANUP OLD LOGS ON STARTUP ---
         self.cleanup_old_logs()
+        self.hard_reset_pico()
+        self._init_serial_port()
 
-        # GPIO reset and pause
-        self.PIN_RESET = 17; self.PIN_PAUSE = 27   
-        GPIO.setwarnings(False); GPIO.setmode(GPIO.BCM)
+        self.is_running = False; self.is_paused = False
+        self.protocol_steps = []; self.ptr = 0; self.seq_num = 1 
+        self.backlight_path = self._find_backlight_path()
+        self.max_brightness = self._get_max_brightness()
+
+    def _find_backlight_path(self):
+        return getattr(self.backlight, "backlight_path", None)
+
+    def _get_max_brightness(self):
+        return getattr(self.backlight, "max_brightness", 255)
+
+    def _init_gpio_pins(self):
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setwarnings(False)
+        GPIO.setup(self.PIN_LID_LIM, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         GPIO.setup(self.PIN_RESET, GPIO.OUT); GPIO.setup(self.PIN_PAUSE, GPIO.OUT)
         GPIO.output(self.PIN_PAUSE, 0)
-        self.hard_reset_pico()
 
-        # Serial
+    def _init_serial_port(self):
         try:
             print("🔌 Connecting to Serial...", flush=True)
             self.ser = serial.Serial('/dev/ttyAMA3', 115200, timeout=0.1)
@@ -440,549 +111,288 @@ class RobotClient:
             print(f"⚠️ Serial Error: {e}", flush=True)
             self.state["connection"] = "Error"; self.ser = None
 
-        self.is_running = False; self.is_paused = False
-        self.protocol_steps = []; self.ptr = 0; self.seq_num = 1 
-        self.backlight_path = self._find_backlight_path()
-        self.max_brightness = self._get_max_brightness()
-        
-        # ... keep your existing socket/server connection code here ...
-        print(f"DEBUG: Backlight Path: {self.backlight_path}")
-    # --- NEW: THERMAL CONTROL LOOP ---
-    def update_thermal_control(self):
-        # 1. Get Current Temp (Enclosure)
-        # Using "bme_temp" as source. Fallback to 0.
-        sensors = self.sensors.get_all() # Assuming you have SensorManager updated
-        current_temp = sensors.get("bme_temp", 0)
-        target = self.state["target_temp"]
+    # --- UI PASSTHROUGH INTERFACES ---
+    def sync_with_server(self):
+        self.network.sync_with_server()
 
-        # SAFETY: If temp sensor fails (0.0) or target is 0, TURN OFF
-        if current_temp <= 0.1 or target <= 0:
-            self.heater.set_duty(0)
-            self.heater_fan.set_speed(self.state["fan_manual_val"] if self.state["fan_mode"] == "Manual" else 0)
-            self.state["heater_duty"] = 0
-            return
-
-        # 2. Update PID
-        self.pid.target = target
-        output = self.pid.update(current_temp)
-
-        # 3. Apply Logic based on Mode
-        heater_val = 0
-        fan_val = 0
-
-        if output > 0:
-            # HEATING NEEDED
-            heater_val = output # 0 to 100
-            fan_val = 0 # Off (or min airflow)
-        else:
-            # COOLING NEEDED (Overshoot)
-            heater_val = 0
-            fan_val = abs(output) # 0 to 100
-
-        # 4. Override Fan if Manual
-        if self.state["fan_mode"] == "Manual":
-            fan_val = self.state["fan_manual_val"]
-            # In Manual Fan mode, PID only controls Heater (0-100)
-            # If PID wanted negative (cooling), heater just stays 0.
-
-        if heater_val > 0:
-            self.heater_fan.set_speed(fan_val) # Run heater fan gently to spread heat
-            self.cooling_fan.set_speed(0)
-        else:
-            self.heater_fan.set_speed(0)
-            self.cooling_fan.set_speed(fan_val) # Run cooling fan based on PID
-            
-        # Update State
-        self.state["heater_duty"] = heater_val
-        self.state["fan_rpm"] = self.cooling_fan.get_rpm()
-        self.state["heater_fan_rpm"] = self.heater_fan.get_rpm()
-        
-        self.state["sensor_data"] = sensors # Ensure latest sensors stored
-        
-        
-        
-    def toggle_light(self):
-        """Toggles WS2812 LEDs."""
-        new_state = not self.state["light_on"]
-        self.state["light_on"] = new_state
-        self.light.toggle(new_state)
-        #GPIO.output(self.PIN_LIGHT, new_state)
-        self.log(f"💡 Light {'ON' if new_state else 'OFF'}")
-        self.sync_with_server() # Push change to server
-         
     def get_connected_ssid(self):
-        """Reliably gets the current WiFi SSID."""
-        # Method 1: Try 'iwgetid' (Standard on Raspberry Pi)
-        try:
-            # Output looks like: wlan0     ESSID:"MyWifiName"
-            output = subprocess.check_output(["iwgetid", "-r"], encoding="utf-8").strip()
-            if output: return output
-        except:
-            pass
-            
-        # Method 2: nmcli active connection check
-        try:
-            # Get active connection names
-            result = subprocess.check_output(
-                ["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show", "--active"], 
-                encoding="utf-8"
-            )
-            for line in result.split("\n"):
-                # active line looks like: MyWifiName:802-11-wireless
-                if "802-11-wireless" in line or "wifi" in line:
-                    return line.split(":")[0]
-        except:
-            pass
-            
-        return None
+        return self.network.get_connected_ssid()
 
-    def get_wifi_networks(self):
-        """Forces a fresh scan and returns networks."""
-        
-        # 1. Get current SSID
-        current_ssid = self.get_connected_ssid()
-        if current_ssid: current_ssid = current_ssid.strip()
-        print(f"DEBUG: Active SSID is '{current_ssid}'")
+    def get_wifi_networks(self): 
+        return self.network.get_wifi_networks()
 
-        try:
-            # --- FORCE RESCAN ---
-            # This tells the hardware to actually look for networks now.
-            # It connects asynchronously, so we wait a moment or just run it.
-            # 'nmcli dev wifi rescan' returns immediately but scan takes time.
-            print("DEBUG: Triggering hardware rescan...")
-            subprocess.run(["nmcli", "dev", "wifi", "rescan"], stderr=subprocess.DEVNULL)
-            
-            # Optional: Sleep briefly to allow scan to populate (0.5s - 1s)
-            import time
-            time.sleep(1) 
-            
-            # 2. READ RESULTS
-            cmd = ["nmcli", "-t", "-f", "SSID,SIGNAL", "dev", "wifi"]
-            result = subprocess.check_output(cmd, encoding="utf-8")
-            
-            unique_nets = {}
-            
-            for line in result.split("\n"):
-                if not line: continue
-                parts = line.split(":")
-                if len(parts) < 2: continue
-                
-                raw_ssid = ":".join(parts[:-1]) 
-                ssid = raw_ssid.strip()
-                if not ssid: continue 
-                
-                try: signal = int(parts[-1])
-                except: signal = 0
-                
-                is_connected = False
-                if current_ssid and ssid == current_ssid:
-                    is_connected = True
-                
-                if ssid not in unique_nets:
-                    unique_nets[ssid] = {"ssid": ssid, "signal": signal, "connected": is_connected}
-                else:
-                    if is_connected: unique_nets[ssid]["connected"] = True
-                    if signal > unique_nets[ssid]["signal"]:
-                        unique_nets[ssid]["signal"] = signal
-
-            networks = list(unique_nets.values())
-            networks.sort(key=lambda x: (not x["connected"], -x["signal"]))
-            return networks[:15]
-            
-        except Exception as e:
-            print(f"WiFi Scan Error: {e}")
-            return []   
-    
-    """ def connect_wifi(self, ssid, password):
-        print(f"📡 Managing WiFi Connection: {ssid}...", flush=True)
-        
-        # Helper to run nmcli commands cleanly
-        def nmcli_cmd(args):
-            return subprocess.run(
-                ["sudo", "nmcli"] + args, 
-                capture_output=True, 
-                text=True
-            )
-
-        try:
-            # 1. ALWAYS DELETE EXISTING PROFILES FOR THIS SSID
-            # This prevents "Secrets were required but not provided" errors.
-            # We don't care if it fails (profile doesn't exist), so we ignore errors.
-            print(f"🧹 Cleaning up old profiles for '{ssid}'...")
-            nmcli_cmd(["connection", "delete", "id", ssid])
-            
-            # 2. FRESH CONNECT
-            # This forces nmcli to use the password provided NOW.
-            print(f"🔗 Connecting to '{ssid}'...")
-            res = nmcli_cmd(["dev", "wifi", "connect", ssid, "password", password])
-            
-            # 3. VERIFY SUCCESS
-            if res.returncode == 0:
-                print(f"✅ WiFi Connected to {ssid}!")
-                
-                # Wait 2 seconds for DHCP to assign an IP address
-                time.sleep(2.0)
-                
-                # Check if we actually got an IP
-                ip_check = subprocess.run(["hostname", "-I"], capture_output=True, text=True)
-                new_ip = ip_check.stdout.strip()
-                print(f"🌍 New IP: {new_ip}")
-
-                if not new_ip:
-                    print("⚠️ Warning: Connected but no IP address yet.")
-
-                print("🔄 Restarting Streaming Services...")
-                try:
-                    # Restart services to bind to new IP
-                    subprocess.run(["sudo", "systemctl", "restart", "mediamtx"], check=True)
-                    subprocess.run(["sudo", "systemctl", "restart", "cloudflared"], check=True)
-                    print("✅ Services Restarted")
-                    return True
-                except Exception as e:
-                    print(f"⚠️ Service Restart Warning: {e}")
-                    return True # Still return True because WiFi itself is fine
-            
-            else:
-                # Print the exact error from nmcli to the logs
-                print(f"❌ Connect Failed: {res.stderr.strip()}")
-                return False
-
-        except Exception as e:
-            print(f"❌ WiFi System Error: {e}")
-            return False    
-         """    
     def connect_wifi(self, ssid, password):
-        print(f"📡 Connecting to {ssid} (Step-by-Step Method)...", flush=True)
-
-        def run_nmcli(args):
-            # Helper to run nmcli silently
-            return subprocess.run(
-                ["sudo", "nmcli"] + args, 
-                capture_output=True, text=True
-            )
-
-        try:
-            # STEP 1: DELETE OLD GHOST PROFILES
-            # If we don't do this, nmcli might make "SSID-1", "SSID-2" duplicates.
-            print(f"   1. Cleaning old profiles for {ssid}...")
-            # We run this blindly; ignore errors if profile doesn't exist.
-            run_nmcli(["connection", "delete", ssid])
-
-            # STEP 2: CREATE NEW EMPTY PROFILE
-            # We create a specific connection named exactly "ssid"
-            print(f"   2. Creating new profile...")
-            res_add = run_nmcli([
-                "connection", "add", 
-                "type", "wifi", 
-                "ifname", "wlan0", 
-                "con-name", ssid, 
-                "ssid", ssid
-            ])
-            
-            if res_add.returncode != 0:
-                print(f"❌ Failed to add profile: {res_add.stderr}")
-                return False
-
-            # STEP 3: INJECT PASSWORD (NON-INTERACTIVE)
-            # This sets the password directly in the database. No prompts.
-            print(f"   3. Setting password...")
-            res_sec = run_nmcli([
-                "connection", "modify", ssid, 
-                "wifi-sec.key-mgmt", "wpa-psk", 
-                "wifi-sec.psk", password
-            ])
-            
-            if res_sec.returncode != 0:
-                print(f"❌ Failed to set password: {res_sec.stderr}")
-                return False
-
-            # STEP 4: ACTIVATE (CONNECT)
-            # Now we just flip the switch.
-            print(f"   4. Activating connection...")
-            res_up = run_nmcli(["connection", "up", ssid])
-            
-            if res_up.returncode != 0:
-                print(f"❌ Connection Up Failed: {res_up.stderr}")
-                # Clean up the broken profile so we don't leave trash
-                run_nmcli(["connection", "delete", ssid])
-                return False
-
-            # STEP 5: SUCCESS & RESTART SERVICES
-            print(f"✅ Connected to {ssid}!")
-            
-            # Wait a moment for IP address
-            time.sleep(2)
-            
-            print("🔄 Restarting Streaming Services...")
-            try:
-                subprocess.run(["sudo", "systemctl", "restart", "mediamtx"], check=True)
-                subprocess.run(["sudo", "systemctl", "restart", "cloudflared"], check=True)
-                print("✅ Services Restarted")
-                return True
-            except Exception as e:
-                print(f"⚠️ Service Restart Warning: {e}")
-                return True # Wifi is good, so return True
-
-        except Exception as e:
-            print(f"❌ Critical WiFi Error: {e}")
-            return False
-   
-    def _find_backlight_path(self):
-        """Auto-detects the backlight controller path."""
-        # Common locations for Raspberry Pi DSI / GPIO displays
-        search_paths = [
-            "/sys/class/backlight/rpi_backlight",
-            "/sys/class/backlight/*", # Wildcard search for others
-        ]
-        
-        for p in search_paths:
-            matches = glob.glob(p)
-            for match in matches:
-                # Check if 'brightness' file exists inside
-                if os.path.exists(os.path.join(match, "brightness")):
-                    return match
-        return None
-
-    def _get_max_brightness(self):
-        """Reads the maximum hardware brightness value."""
-        if not self.backlight_path: return 255
-        try:
-            with open(os.path.join(self.backlight_path, "max_brightness"), "r") as f:
-                return int(f.read().strip())
-        except:
-            return 255
+        return self.network.connect_wifi(ssid, password)
 
     def get_brightness(self):
-        """Reads current brightness as a percentage (0-100)."""
-        if not self.backlight_path:
-            return 50 # Default fallback
-            
-        try:
-            with open(os.path.join(self.backlight_path, "brightness"), "r") as f:
-                val = int(f.read().strip())
-                
-            # Convert hardware value to percentage
-            pct = int((val / self.max_brightness) * 100)
-            return pct
-        except Exception as e:
-            print(f"Error reading brightness: {e}")
-            return 50
+        return self.backlight.get_brightness()
 
     def set_brightness(self, level_pct):
-        """Sets brightness using the detected hardware limits."""
-        if not self.backlight_path:
-            self.log("⚠ No supported backlight controller found.")
-            return
+        self.backlight.set_brightness(level_pct)
 
-        try:
-            # Clamp percentage 5-100 (Prevent turning screen off completely)
-            level_pct = max(5, min(100, level_pct))
-            
-            # Calculate hardware value
-            val = int((level_pct / 100.0) * self.max_brightness)
-            
-            path = os.path.join(self.backlight_path, "brightness")
-            
-            with open(path, "w") as f:
-                f.write(str(val))
-            
-            # self.log(f"☀ Set to {level_pct}%") # Optional logging
-            
-        except PermissionError:
-            self.log("⚠ Permission Denied. Run: sudo chmod 777 " + os.path.join(self.backlight_path, "brightness"))
-        except Exception as e:
-            self.log(f"⚠ Brightness Error: {e}")
-    # --- UPDATED: CLEANUP BOTH FOLDERS ---
-    def cleanup_old_logs(self, days=7):
-        print("🧹 Checking for old logs...", flush=True)
-        now = time.time()
-        cutoff = now - (days * 86400)
-        count = 0
+    def ui_send_gcode(self, gcode): self.command_queue.put(("MANUAL", gcode))
+    def ui_load_and_run(self, filename): self.command_queue.put(("LOAD_LOCAL", (filename, "User")))
+    def ui_pause_resume(self): self.command_queue.put(("TOGGLE_PAUSE", None))
+    def ui_stop(self): self.command_queue.put(("STOP", None))
+    def ui_ack_start(self): self.state["just_started"] = False
+    def ui_ack_stop(self): self.reset_all_state()
+    def ui_ack_error(self): self.reset_all_state()
+
+    def start(self):
+        threading.Thread(target=self._run_loop, daemon=True).start()
+        self.network.start()
+
+    def get_telemetry_snapshot(self):
+        self.state["lid_open"] = (GPIO.input(self.PIN_LID_LIM) == GPIO.HIGH)
         
-        # Helper to clean a specific dir
-        def clean_dir(directory):
-            c = 0
-            try:
-                for f in os.listdir(directory):
-                    fpath = os.path.join(directory, f)
-                    if os.path.isfile(fpath):
-                        if os.path.getctime(fpath) < cutoff:
-                            os.remove(fpath); c += 1
-            except: pass
-            return c
-
-        count += clean_dir(DIR_PROTO_LOGS)
-        count += clean_dir(DIR_CALIB_LOGS)
+        # Mutate sensor data pointer tree in-place
+        sensors = self.sensors.get_all()
+        self.state["sensor_data"].clear()
+        self.state["sensor_data"].update(sensors)
         
-        if count > 0: print(f"✅ Deleted {count} logs older than {days} days.")
-
-    def hard_reset_pico(self):
-        print("⚡ Hard Resetting Pico...", flush=True)
-        GPIO.output(self.PIN_RESET, 0); time.sleep(0.2)
-        GPIO.output(self.PIN_RESET, 1); time.sleep(1.5)
-        self.connection_time = time.time()
-
-    def calculate_estimate(self):
-        if not self.is_running or self.is_paused or not self.start_time: return
-        total = len(self.protocol_steps)
-        if total == 0: return
-        if self.ptr == 0: self.state["est"] = "Calculating..."; return
-        progress_pct = (self.ptr / total) * 100
-        self.state["progress"] = int(progress_pct)
-        if progress_pct > 1:
-            elapsed = time.time() - self.start_time
-            raw_remaining = (elapsed / progress_pct) * (100 - progress_pct)
-            if self.smoothed_seconds == 0: self.smoothed_seconds = raw_remaining
-            else: self.smoothed_seconds = (0.95 * self.smoothed_seconds) + (0.05 * raw_remaining)
-            self.state["est"] = self.format_time_dhms(self.smoothed_seconds)
-        else: self.state["est"] = "Calculating..."
-
-    def format_time_dhms(self, seconds):
-        if seconds <= 0: return "00:00:00:00"
-        m, s = divmod(int(seconds), 60); h, m = divmod(m, 60); d, h = divmod(h, 24)
-        return f"{d:02}:{h:02}:{m:02}:{s:02}"
-
-    # --- UPDATED: INTELLIGENT LOG PATH SELECTION ---
-    def start_new_log_session(self, filename):
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        
-        # Decide Folder based on content
-        if "Calibration" in filename:
-            target_dir = DIR_CALIB_LOGS
-        else:
-            target_dir = DIR_PROTO_LOGS
-            
-        # Construct Filename (Prevent double timestamping)
-        if timestamp not in filename:
-            name = f"{filename}_{timestamp}.log"
-        else:
-            name = f"{filename}.log"
-            
-        self.current_session_log_path = os.path.join(target_dir, name)
-        self.log(f"🚀 Session Started: {name}")
-
-    def log(self, msg):
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        entry = f"[{timestamp}] {msg}"
-        print(entry, flush=True); self.state["logs"].append(entry)
-        if len(self.state["logs"]) > 5: self.state["logs"].pop(0)
-        self.log_accumulator.append(entry)
-        
-        if self.current_session_log_path:
-            try:
-                with open(self.current_session_log_path, "a", encoding="utf-8") as f: f.write(entry + "\n")
-            except: pass
-
-    def sync_with_server(self):
-        is_open = GPIO.input(self.PIN_LID_LIM) == GPIO.HIGH
-        self.state["lid_open"] = is_open
-        self.state["sensor_data"] = self.sensors.get_all()
         line_txt = self.state["current_line"]
         if self.state["current_desc"]: line_txt += f" ({self.state['current_desc']})"
+        
         payload = {
             "file": self.state["filename"], "line": line_txt, "progress": self.state["progress"],
             "est": self.state["est"], "status": self.state["status"], "logs": "\n".join(self.log_accumulator),
             "started_by": self.state["started_by"],
-            # --- SYNC LOCK & STATUS ---
             "calib_active": self.state["calibration_active"],
             "calib_source": self.state["calibration_source"],
             "calib_status": self.state["calib_status"],
             "is_calibrated": self.state["is_calibrated"],
-            
-            "file": self.state["filename"],
-            "status": self.state["status"],
-            
-            # ADD THESE NEW FIELDS
             "light_on": self.state["light_on"],
             "sensors": self.state["sensor_data"],
             "lid_open": self.state["lid_open"],
             "pipettes": self.state["pipettes"]
         }
-        self.log_accumulator = [] 
-        
-        try:
-            r = requests.post(f"{SERVER_URL}/pi/sync", json=payload, timeout=2.0)
-            if r.status_code == 200:
-                if not self.server_connected: self.log("✅ Connected to Server")
-                self.server_connected = True
-                self.sync_fail_count = 0 # Reset fail count
-                for cmd in r.json().get("commands", []): self.handle_server_command(cmd)
-        except: 
-            self.sync_fail_count += 1
-            # Only go "Offline" if failed 3 times in a row
-            if self.sync_fail_count > 3:
-                if self.server_connected: self.log("⚠️ Lost connection to Server")
-                self.server_connected = False
-      
+        self.log_accumulator.clear()
+        return payload
 
- 
-    def handle_server_command(self, cmd):
-        # DEBUG: Print every command received to verify connection
-        print(f"DEBUG: Processing Server Command -> {cmd}", flush=True)
-        
-        ev = cmd.get("event")
-        data = cmd.get("data") # Get the data payload
+    def update_thermal_control(self):
+        sensors = self.sensors.get_all()
+        current_temp = sensors.get("bme_temp", 0)
+        target = self.state["target_temp"]
 
-        # 1. Control Commands
-        if ev == "PAUSE": 
-            self.command_queue.put(("REMOTE_PAUSE", None))
-        elif ev == "RESUME": 
-            self.command_queue.put(("REMOTE_RESUME", None))
-        elif ev == "CLEAR": 
-            self.command_queue.put(("REMOTE_STOP", None))
-        
-        # 2. Thermal Setup
-        elif ev == "SET_THERMAL":
-            # Pass the dictionary directly
-            self.command_queue.put(("SET_THERMAL", data))
+        if current_temp <= 0.1 or target <= 0:
+            self.heater.set_duty(0)
+            self.heater_fan.set_speed(self.state["fan_manual_val"] if self.state["fan_mode"] == "Manual" else 0)
+            self.state["heater_duty"] = 0
             
-        # 3. Download & Run (CRITICAL FIX)
-        # Server sends event "DOWNLOAD_AND_RUN". Old code expected "NEW_FILE".
-        elif ev == "DOWNLOAD_AND_RUN" or ev == "NEW_FILE":
-            # Handle both list format [filename, source] and dict format
-            if isinstance(data, list):
-                self.command_queue.put(("DOWNLOAD_AND_RUN", data))
-            elif isinstance(data, str):
-                # Fallback for old "NEW_FILE" format just in case
-                self.command_queue.put(("DOWNLOAD_AND_RUN", [data, "Remote"]))
-            else:
-                # Fallback if data is missing but filename is in cmd root
-                fname = cmd.get("filename")
-                if fname: self.command_queue.put(("DOWNLOAD_AND_RUN", [fname, "Remote"]))
+            # Mutate dictionary in-place
+            self.state["sensor_data"].clear()
+            self.state["sensor_data"].update(sensors)
+            return
 
-        # 4. Calibration
-        elif ev == "SERIAL_SEND":
-            if self.ser and data: 
-                self.log(f"TX (Remote): {data}")
-                self.ser.write((data + "\n").encode())
-        elif ev == "CALIB_START": 
-            self.set_calibration_mode(True, "Remote")
-            if self.ser: 
-                # --- DYNAMIC PIPETTE CALIBRATION COMMAND ---
-                pips = self.state.get("pipettes", {})
-                left_attached = pips.get("left", {}).get("found", False)
-                right_attached = pips.get("right", {}).get("found", False)
-                
-                print(f"Calib Started Function - Left: {left_attached}, Right: {right_attached}")
-                
-                # Priority: Left (P1), then Right (P2)
-                # Use self.ser.write() to send to the Pico directly
-                if left_attached and right_attached:
-                    # If both, send T00 P1 (or your preferred logic)
-                    self.ser.write(b"T00 P1\n") 
-                    
-                elif left_attached:
-                    self.ser.write(b"T00 P1\n")
-                    
-                elif right_attached:
-                    self.ser.write(b"T00 P2\n")
-                    
+        self.pid.target = target
+        output = self.pid.update(current_temp)
+
+        heater_val = output if output > 0 else 0
+        fan_val = abs(output) if output <= 0 else 0
+
+        if self.state["fan_mode"] == "Manual":
+            fan_val = self.state["fan_manual_val"]
+
+        if heater_val > 0:
+            self.heater_fan.set_speed(fan_val)
+            self.cooling_fan.set_speed(0)
+        else:
+            self.heater_fan.set_speed(0)
+            self.cooling_fan.set_speed(fan_val)
+            
+        self.state["heater_duty"] = heater_val
+        self.state["fan_rpm"] = self.cooling_fan.get_rpm()
+        self.state["heater_fan_rpm"] = self.heater_fan.get_rpm()
+        
+        # Mutate dictionary in-place
+        self.state["sensor_data"].clear()
+        self.state["sensor_data"].update(sensors)
+        
+    def toggle_light(self):
+        new_state = not self.state["light_on"]
+        self.state["light_on"] = new_state
+        self.light.toggle(new_state)
+        self.log(f"💡 Light {'ON' if new_state else 'OFF'}")
+
+    def send_initial_calibration_gcode(self):
+        if not self.ser:
+            return
+        pips = self.state.get("pipettes", {})
+        left_attached = pips.get("left", {}).get("found", False)
+        right_attached = pips.get("right", {}).get("found", False)
+        if left_attached and right_attached: self.ser.write(b"T00 P1\n")
+        elif left_attached: self.ser.write(b"T00 P1\n")
+        elif right_attached: self.ser.write(b"T00 P2\n")
+        else: self.ser.write(b"T00\n")
+
+    def _run_loop(self):
+        waiting_for_response = False
+        last_pipette_check = 0  
+        last_sensor_read = 0  
+        
+        while True:
+            if time.time() - last_sensor_read > 0.5:
+                self.update_thermal_control()
+                last_sensor_read = time.time()
+
+            if time.time() - last_pipette_check > 2.0:
+                if self.pipettes.scan_pipettes():
+                    self.state["pipettes"].clear()
+                    self.state["pipettes"].update(self.pipettes.get_state())
+                last_pipette_check = time.time()
+
+            self.calculate_estimate()
+
+            try:
+                while not self.command_queue.empty():
+                    cmd_type, data = self.command_queue.get_nowait()
+
+                    if cmd_type == "MANUAL" and self.ser:
+                        self.ser.write((data + "\n").encode())
+                    elif cmd_type == "LOAD_LOCAL":
+                        fname, source = data
+                        self.load_local_protocol(fname, source)
+                        waiting_for_response = False
+                    elif cmd_type == "DOWNLOAD_AND_RUN":
+                        fname, source = data
+                        self.load_local_protocol(fname, source)
+                        waiting_for_response = False
+                    elif cmd_type == "TOGGLE_LIGHT":
+                        self.toggle_light()
+                    elif cmd_type == "SET_THERMAL":
+                        self.state["target_temp"] = int(data.get("target_temp", 0))
+                        self.state["fan_mode"] = data.get("fan_mode", "Auto")
+                        self.state["fan_manual_val"] = int(data.get("fan_manual_val", 0))
+                        self.log(f"🌡 Settings Rx: {self.state['target_temp']}C, Fan: {self.state['fan_mode']}")
+                    elif cmd_type == "CONNECT_WIFI":
+                        ssid, pw = data
+                        t = threading.Thread(target=self.network.connect_wifi, args=(ssid, pw), daemon=True)
+                        t.start()
+                    elif not self.protocol_steps:
+                        self.log(f"⚠️ Ignored {cmd_type} (No Protocol Loaded)")
+                        continue
+                    elif cmd_type in ["STOP", "REMOTE_STOP"]:
+                        source = "Remote" if cmd_type == "REMOTE_STOP" else "User"
+                        self.is_running = False
+                        self.log(f"🛑 STOPPED ({source})")
+                        last_file = self.state["filename"]
+                        self.reset_all_state()
+                        self.state["filename"] = last_file
+                        self.state["status"] = f"Stopped ({source})"
+                        self.state["stop_reason"] = source
+                        self.expect_reset = True
+                        waiting_for_response = False
+                        self.hard_reset_pico()
+                    elif cmd_type in ["TOGGLE_PAUSE", "REMOTE_PAUSE", "REMOTE_RESUME"]:
+                        should_pause = False
+                        if cmd_type == "REMOTE_PAUSE":
+                            should_pause = True
+                        elif cmd_type == "REMOTE_RESUME":
+                            should_pause = False
+                        else:
+                            should_pause = not self.is_paused
+
+                        self.is_paused = should_pause
+
+                        if self.is_paused:
+                            reason = "Remote" if cmd_type == "REMOTE_PAUSE" else "User"
+                            self.state["pause_reason"] = reason
+                            self.state["status"] = f"Paused ({reason})"
+                            GPIO.output(self.PIN_PAUSE, 1)
+                            self.log(f"⏸ PAUSE ({reason})")
+                        else:
+                            source = "Remote" if cmd_type == "REMOTE_RESUME" else "User"
+                            if self.state["pause_reason"] == "System":
+                                self.log(f"▶ RESUME ({source}) - Advancing Wait Command")
+                                self.ptr += 1
+                                self.seq_num += 1
+                                waiting_for_response = False
+                            else:
+                                self.log(f"▶ RESUME ({source})")
+
+                            self.state["status"] = "Running"
+                            self.state["pause_reason"] = None
+                            GPIO.output(self.PIN_PAUSE, 0)
+            except: pass
+
+            if self.ser and self.ser.in_waiting:
+                try:
+                    resp = self.ser.readline().decode().strip()
+                    if resp:
+                        self.log(f"RX: {resp}")
+
+                    if self.state["calibration_active"]:
+                        if self.state["calib_status"] == "Homing" and "HOME" in resp:
+                            self.state["calib_status"] = "Moving"
+                            self.sync_with_server()
+                        elif self.state["calib_status"] == "Moving" and resp == "X":
+                            self.state["calib_status"] = "Ready"
+                            self.sync_with_server()
+
+                        if "C_OK" in resp or "OK_C" in resp:
+                            self.log("✅ Calibration Offsets Saved")
+                            self.state["is_calibrated"] = True
+                            self.set_calibration_mode(False, None)
+                            self.sync_with_server()
+
+                    if "Initialized" in resp:
+                        if self.expect_reset:
+                            self.log("✅ Reset Confirmed")
+                            self.expect_reset = False
+                        else:
+                            self.log("🚨 EMERGENCY STOP (Physical)")
+                            self.is_running = False
+                            self.state["status"] = "Error"
+                            self.state["stop_reason"] = "Physical"
+                            self.state["current_line"] = "E-STOP"
+                            self.state["est"] = "HALTED"
+                            waiting_for_response = False
+
+                    if "ERR" in resp:
+                        if time.time() - self.connection_time < self.grace_period:
+                            self.log(f"⚠️ Ignored Startup Noise: {resp}")
+                        else:
+                            parts = resp.split(":", 1)
+                            clean_err = parts[1].strip() if len(parts) > 1 else "Unknown Hardware Error"
+                            self.log(f"❌ SYSTEM ERROR: {clean_err}")
+                            self.is_running = False
+                            self.state["status"] = "Error"
+                            self.state["error_msg"] = clean_err
+                            self.state["current_line"] = "Error"
+                            self.state["current_desc"] = "Halted"
+                            self.state["est"] = "ERROR"
+                            waiting_for_response = False
+                            self.expect_reset = True
+                            self.hard_reset_pico()
+
+                    if self.is_running:
+                        if "PAUSE" in resp:
+                            self.is_paused = True
+                            self.state["status"] = "Paused (System)"
+                            self.state["pause_reason"] = "System"
+                            self.log("⏸ System Paused (Wait Command)")
+                            GPIO.output(self.PIN_PAUSE, 1)
+                        elif "OK" in resp:
+                            self.ptr += 1
+                            self.seq_num += 1
+                            waiting_for_response = False
+                except: pass
+
+            if self.is_running and not self.is_paused and self.protocol_steps:
+                if self.ptr < len(self.protocol_steps):
+                    if not waiting_for_response:
+                        step = self.protocol_steps[self.ptr]
+                        self.state["current_line"] = step["cmd"]; self.state["current_desc"] = step["desc"]
+                        self.state["status"] = "Running"
+                        packet = f"N{step['cmd']}*{self.seq_num}"
+                        self.log(f"TX: {packet}")
+                        if self.ser: self.ser.write((packet + "\n").encode()); waiting_for_response = True
+                        else: self.is_running = False
                 else:
-                    self.ser.write(b"T00\n")
-        elif ev == "CALIB_END": 
-            self.set_calibration_mode(False, None)
-            
-            
+                    self.log("✅ Done"); self.is_running = False
+                    self.state["status"] = "Done"; self.state["progress"] = 100; self.state["completed"] = True 
+            time.sleep(0.005)
+
     def parse_gcode_file(self, lines):
         steps = []; pending_desc = ""
         for line in lines:
@@ -1019,25 +429,6 @@ class RobotClient:
             if self.ser: self.ser.reset_input_buffer()
         except Exception as e: self.log(f"❌ Read Error: {e}")
 
-    def download_protocol(self, filename, source):
-        self.log(f"📥 Downloading: {filename}...")
-        try:
-            local_path = os.path.join(DIR_RECENT, filename)
-            url = f"{SERVER_URL}/download/{filename}"
-            r = requests.get(url, timeout=3)
-            if r.status_code == 200:
-                with open(local_path, "wb") as f: f.write(r.content)
-                self.log("✅ Downloaded"); self.load_local_protocol(filename, source) 
-            else: self.log(f"❌ Server Error: {r.status_code}")
-        except Exception as e: self.log(f"❌ Download Failed: {e}")
-
-    def ui_send_gcode(self, gcode): self.command_queue.put(("MANUAL", gcode))
-    def ui_load_and_run(self, filename): self.command_queue.put(("LOAD_LOCAL", (filename, "User")))
-    def ui_pause_resume(self): self.command_queue.put(("TOGGLE_PAUSE", None))
-    def ui_stop(self): self.command_queue.put(("STOP", None))
-    def ui_ack_start(self): self.state["just_started"] = False
-    
-    # --- UPDATED: CALIBRATION LOGGING + NAMING FIX ---
     def set_calibration_mode(self, active, source):
         self.state["calibration_active"] = active
         self.state["calibration_source"] = source
@@ -1045,195 +436,95 @@ class RobotClient:
             clean_source = "Local" if source == "User" else source
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             calib_name = f"Calibration_{clean_source}_{timestamp}"
-            
             self.state["filename"] = calib_name
             self.start_new_log_session(calib_name)
-            
             self.log(f"🔧 Calibration Started by {clean_source}")
-            self.state["calib_status"] = "Homing" 
-            self.sync_with_server()
+            self.state["calib_status"] = "Homing"
         else:
             self.log("🔧 Calibration Ended")
             self.state["calib_status"] = "Idle"
-            
-            # --- FIX: HARD RESET STATE ON EXIT ---
-            self.state["filename"] = "None" 
+            self.state["filename"] = "None"
             self.state["started_by"] = "Unknown"
             self.state["status"] = "Idle"
-            
+        try:
             self.sync_with_server()
+        except Exception:
+            pass
             
     def reset_all_state(self):
-        self.state["stop_reason"] = None; self.state["completed"] = False; self.state["error_msg"] = None 
-        self.state["filename"] = "None"; self.state["started_by"] = "Unknown" 
+        self.state["stop_reason"] = None; self.state["completed"] = False; self.state["error_msg"] = None
+        self.state["filename"] = "None"; self.state["started_by"] = "Unknown"
         self.state["status"] = "Idle"; self.state["current_line"] = "Ready"; self.state["current_desc"] = ""
         self.state["progress"] = 0; self.state["est"] = "--:--:--:--"
-        self.state["is_calibrated"] = False # Force recalibration
-        
-        # --- FIX: Force Calibration OFF on Reset/Error ---
+        self.state["is_calibrated"] = False
         self.state["calibration_active"] = False
         self.state["calib_status"] = "Idle"
         self.state["calibration_source"] = None
-        self.sync_with_server()
+        try:
+            self.sync_with_server()
+        except Exception:
+            pass
 
-    def ui_ack_stop(self): self.reset_all_state()
-    def ui_ack_error(self): self.reset_all_state()
+    def hard_reset_pico(self):
+        print("⚡ Hard Resetting Pico...", flush=True)
+        GPIO.output(self.PIN_RESET, 0); time.sleep(0.2)
+        GPIO.output(self.PIN_RESET, 1); time.sleep(1.5)
+        self.connection_time = time.time()
 
-    def start(self):
-        t = threading.Thread(target=self._run_loop, daemon=True)
-        t.start()
+    def calculate_estimate(self):
+        if not self.is_running or self.is_paused or not self.start_time: return
+        total = len(self.protocol_steps)
+        if total == 0: return
+        if self.ptr == 0: self.state["est"] = "Calculating..."; return
+        progress_pct = (self.ptr / total) * 100
+        self.state["progress"] = int(progress_pct)
+        if progress_pct > 1:
+            elapsed = time.time() - self.start_time
+            raw_remaining = (elapsed / progress_pct) * (100 - progress_pct)
+            if self.smoothed_seconds == 0: self.smoothed_seconds = raw_remaining
+            else: self.smoothed_seconds = (0.95 * self.smoothed_seconds) + (0.05 * raw_remaining)
+            self.state["est"] = self.format_time_dhms(self.smoothed_seconds)
+        else: self.state["est"] = "Calculating..."
 
-    def _run_loop(self):
-        last_sync = time.time()
-        waiting_for_response = False
-        last_pipette_check = 0  # <--- NEW TIMER VARIABLE
-        last_sensor_read = 0  # <--- NEW TIMER
-        while True:
-            # 1. READ SENSORS (Only every 0.5s)
-            if time.time() - last_sensor_read > 0.5:
-                self.update_thermal_control() # This calls sensors.get_all()
-            self.calculate_estimate()
-            # --- 1. CONTINUOUS PIPETTE SCAN (Every 2 Seconds) ---
-            if time.time() - last_pipette_check > 2.0:
-                # Only update state if hardware actually changed (prevents log spam)
-                if self.pipettes.scan_pipettes():
-                    self.state["pipettes"] = self.pipettes.get_state()
-                    # We don't need to force sync here; the next sync_with_server 
-                    # loop (below) will pick up the new state automatically.
-                last_pipette_check = time.time()
-                
-            if time.time() - last_sync > 0.5: 
-                self.sync_with_server() 
-                last_sync = time.time()
-            
+    def format_time_dhms(self, seconds):
+        if seconds <= 0: return "00:00:00:00"
+        m, s = divmod(int(seconds), 60); h, m = divmod(m, 60); d, h = divmod(h, 24)
+        return f"{d:02}:{h:02}:{m:02}:{s:02}"
+
+    def start_new_log_session(self, filename):
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        target_dir = DIR_CALIB_LOGS if "Calibration" in filename else DIR_PROTO_LOGS
+        name = f"{filename}.log" if timestamp in filename else f"{filename}_{timestamp}.log"
+        self.current_session_log_path = os.path.join(target_dir, name)
+        self.log(f"🚀 Session Started: {name}")
+
+    def log(self, msg):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        entry = f"[{timestamp}] {msg}"
+        print(entry, flush=True); self.state["logs"].append(entry)
+        if len(self.state["logs"]) > 5: self.state["logs"].pop(0)
+        self.log_accumulator.append(entry)
         
-            try:
-                while not self.command_queue.empty():
-                    cmd_type, data = self.command_queue.get_nowait()
-                    
-                    if cmd_type == "MANUAL" and self.ser: self.ser.write((data + "\n").encode())
-                    elif cmd_type == "LOAD_LOCAL": fname, source = data; self.load_local_protocol(fname, source); waiting_for_response = False
-                    elif cmd_type == "DOWNLOAD_AND_RUN": fname, source = data; self.download_protocol(fname, source); waiting_for_response = False
-                    elif cmd_type == "SET_THERMAL":
-                        # Apply settings received from Server Popup
-                        self.state["target_temp"] = int(data.get("target_temp", 0))
-                        self.state["fan_mode"] = data.get("fan_mode", "Auto")
-                        self.state["fan_manual_val"] = int(data.get("fan_manual_val", 0))
-                        self.log(f"🌡 Settings Rx: {self.state['target_temp']}C, Fan: {self.state['fan_mode']}")
-                    # 2. RUNTIME COMMANDS (Guard Clause Added)
-                    # If we have no steps loaded, IGNORE these commands
-                    # to prevent "Running: None" ghost state.
-                    elif not self.protocol_steps:
-                        self.log(f"⚠️ Ignored {cmd_type} (No Protocol Loaded)")
-                        continue
-                    
-                    elif cmd_type == "STOP" or cmd_type == "REMOTE_STOP":
-                        source = "Remote" if cmd_type == "REMOTE_STOP" else "User"
-                        self.is_running = False; self.log(f"🛑 STOPPED ({source})")
-                        last_file = self.state["filename"]; self.reset_all_state(); self.state["filename"] = last_file 
-                        self.state["status"] = f"Stopped ({source})"; self.state["stop_reason"] = source 
-                        self.expect_reset = True; waiting_for_response = False; self.hard_reset_pico()
+        try:
+            with open(os.path.join(LOG_ROOT, "system_boot.log"), "a", encoding="utf-8") as f:
+                f.write(entry + "\n")
+        except:
+            pass
 
-                    # --- PAUSE / RESUME LOGIC ---
-                    elif cmd_type in ["TOGGLE_PAUSE", "REMOTE_PAUSE", "REMOTE_RESUME"]:
-                        should_pause = False
-                        if cmd_type == "REMOTE_PAUSE": should_pause = True
-                        elif cmd_type == "REMOTE_RESUME": should_pause = False
-                        else: should_pause = not self.is_paused 
-                        
-                        self.is_paused = should_pause
-                        
-                        if self.is_paused:
-                            reason = "Remote" if cmd_type == "REMOTE_PAUSE" else "User"
-                            self.state["pause_reason"] = reason
-                            self.state["status"] = f"Paused ({reason})"
-                            GPIO.output(self.PIN_PAUSE, 1)
-                            self.log(f"⏸ PAUSE ({reason})")
-                        else:
-                            source = "Remote" if cmd_type == "REMOTE_RESUME" else "User"
-                            if self.state["pause_reason"] == "System": 
-                                self.log(f"▶ RESUME ({source}) - Advancing Wait Command")
-                                self.ptr += 1
-                                self.seq_num += 1
-                                waiting_for_response = False 
-                            else: 
-                                self.log(f"▶ RESUME ({source})")
-                            
-                            self.state["status"] = "Running"
-                            self.state["pause_reason"] = None
-                            GPIO.output(self.PIN_PAUSE, 0)
-                            
-                    elif cmd_type == "CONNECT_WIFI":
-                        ssid, pw = data
-                        # Run in a thread so the loop doesn't freeze
-                        t = threading.Thread(target=self.connect_wifi, args=(ssid, pw), daemon=True)
-                        t.start()      
-                    
+        if self.current_session_log_path:
+            try:
+                with open(self.current_session_log_path, "a", encoding="utf-8") as f: f.write(entry + "\n")
             except: pass
 
-            if self.ser and self.ser.in_waiting:
-                try:
-                    resp = self.ser.readline().decode().strip()
-                    if resp: self.log(f"RX: {resp}")
-
-                    # --- HARDWARE SYNC LOGIC (CALIBRATION) ---
-                    if self.state["calibration_active"]:
-                        
-                        if self.state["calib_status"] == "Homing":
-                            if "HOME" in resp: 
-                                self.state["calib_status"] = "Moving"
-                                self.sync_with_server()
-                        
-                        elif self.state["calib_status"] == "Moving":
-                            if resp == "X": 
-                                self.state["calib_status"] = "Ready"
-                                self.sync_with_server()
-
-                        # 3. SAVE CONFIRMATION (Unlock Logic)
-                        if "C_OK" in resp or "OK_C" in resp: 
-                            self.log("✅ Calibration Offsets Saved")
-                            self.state["is_calibrated"] = True 
-                            self.set_calibration_mode(False, None) # Unlock
-                            self.sync_with_server()
-
-                    if "Initialized" in resp:
-                        if self.expect_reset: self.log("✅ Reset Confirmed"); self.expect_reset = False
-                        else: 
-                            self.log("🚨 EMERGENCY STOP (Physical)"); self.is_running = False
-                            self.state["status"] = "Error"; self.state["stop_reason"] = "Physical"
-                            self.state["current_line"] = "E-STOP"; self.state["est"] = "HALTED"; waiting_for_response = False
-                    
-                    if "ERR" in resp:
-                        if time.time() - self.connection_time < self.grace_period: self.log(f"⚠️ Ignored Startup Noise: {resp}")
-                        else:
-                            parts = resp.split(":", 1); clean_err = parts[1].strip() if len(parts) > 1 else "Unknown Hardware Error"
-                            self.log(f"❌ SYSTEM ERROR: {clean_err}")
-                            self.is_running = False; self.state["status"] = "Error"
-                            self.state["error_msg"] = clean_err; self.state["current_line"] = "Error"; self.state["current_desc"] = "Halted"
-                            self.state["est"] = "ERROR"; waiting_for_response = False; self.expect_reset = True; self.hard_reset_pico()
-
-                    if self.is_running:
-                        if "PAUSE" in resp:
-                            self.is_paused = True; self.state["status"] = "Paused (System)"
-                            self.state["pause_reason"] = "System"
-                            self.log("⏸ System Paused (Wait Command)"); GPIO.output(self.PIN_PAUSE, 1) 
-                        elif "OK" in resp: self.ptr += 1; self.seq_num += 1; waiting_for_response = False 
-                except: pass
-
-            if self.is_running and not self.is_paused and self.protocol_steps:
-                if self.ptr < len(self.protocol_steps):
-                    # 1. GET STEP DATA
-                    step = self.protocol_steps[self.ptr]
-
-                    if not waiting_for_response:
-                        step = self.protocol_steps[self.ptr]
-                        self.state["current_line"] = step["cmd"]; self.state["current_desc"] = step["desc"]
-                        self.state["status"] = "Running"
-                        packet = f"N{step['cmd']}*{self.seq_num}"
-                        self.log(f"TX: {packet}")
-                        if self.ser: self.ser.write((packet + "\n").encode()); waiting_for_response = True
-                        else: self.is_running = False
-                else:
-                    self.log("✅ Done"); self.is_running = False
-                    self.state["status"] = "Done"; self.state["progress"] = 100; self.state["completed"] = True 
-            time.sleep(0.005)
+    def cleanup_old_logs(self, days=7):
+        cutoff = time.time() - (days * 86400)
+        def clean_dir(directory):
+            c = 0
+            try:
+                for f in os.listdir(directory):
+                    fpath = os.path.join(directory, f)
+                    if os.path.isfile(fpath) and os.path.getctime(fpath) < cutoff:
+                        os.remove(fpath); c += 1
+            except: pass
+            return c
+        clean_dir(DIR_PROTO_LOGS); clean_dir(DIR_CALIB_LOGS)

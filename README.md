@@ -72,5 +72,7 @@ sudo systemctl status cloudflared
     PICO 
     - See Pico subtasks in Clickup
 
-    
 
+# Module Installation Command
+
+ ./env/bin/python -m pip install python-socketio==5.3.0
