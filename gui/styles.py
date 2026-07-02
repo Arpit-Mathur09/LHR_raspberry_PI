@@ -1,0 +1,32 @@
+import os
+BASE_DIR = "/home/lhr/Robot_Client"
+DIR_TEST = os.path.join(BASE_DIR, "test_protocols")
+DIR_RECENT = os.path.join(BASE_DIR, "recent_protocols")
+# --- GLOBAL COLORS ---
+CLR_BG = "#F0F2F5"
+CLR_CARD = "#FFFFFF"
+CLR_SHADOW = "#D1D9E6"
+CLR_PRIMARY = "#2196F3"     
+CLR_PRIMARY_HOVER = "#1976D2"
+CLR_INACTIVE = "#CFD8DC"
+CLR_INACTIVE_HOVER = "#B0BEC5"      
+CLR_SUCCESS = "#4CAF50"
+CLR_SUCCESS_HOVER = "#388E3C"
+CLR_SUCCESS_DARK = "#388E3C"   
+CLR_DANGER = "#D32F2F"   
+CLR_DANGER_HOVER = "#B71C1C"
+CLR_WARNING = "#FBC02D" 
+CLR_WARNING_HOVER = "#F57F17" 
+CLR_WARNING_DARK = "#F57F17" 
+CLR_TEXT = "#212121"
+CLR_INFO_BOX = "#ECEFF1" 
+CLR_PROG_BG = "#E0E0E0" 
+CLR_SAND = "#FFD700"  
+CLR_GLASS = "#555555" 
+CLR_LIGHT_BLUE = "#E3F2FD" 
+CLR_TRAY = "#F7F9FB"         # Cloud White Background
+CLR_TRAY_TEXT = "#37474F"    # Dark Blue-Grey Text
+CLR_TILE_BG = "#FFFFFF"      # Pure White Cards
+CLR_TILE_BORDER = "#DAE0E5"  # Subtle Border color
+CLR_TILE_SHADOW = "#CFD8DC"  # Bottom border "Shadow"
+CLR_ACCENT_BG = "#E3F2FD"  # <--- THIS WAS MISSING (Light Blue for Active Tiles)
