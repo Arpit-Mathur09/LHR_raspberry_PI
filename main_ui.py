@@ -13,6 +13,11 @@ import functools
 import threading # Required for async scanning
 
 
+# # Redirect all print() statements to a log file
+# log_file = open("/home/lhr/Robot_Client/logs/gui_debug.log", "a")
+# sys.stdout = log_file
+# sys.stderr = log_file
+
 # --- DEBUGGING TOOL ---
 def profile(func):
     @functools.wraps(func)
@@ -39,6 +44,9 @@ DIR_RECENT = os.path.join(BASE_DIR, "recent_protocols")
 
 for d in [DIR_TEST, DIR_RECENT]: 
     os.makedirs(d, exist_ok=True)
+
+
+
 
 # --- GLOBAL COLORS ---
 CLR_BG = "#F0F2F5"
@@ -251,22 +259,6 @@ class ScrollableFrame(tk.Frame):
         if new_top > max_scroll: new_top = max_scroll
         self.canvas.yview_moveto(new_top)
 
-# --- BACKGROUND GENERATOR (FIXED) ---
-def get_blur_bg(root_window):
-    if not HAS_PIL: return None
-    try:
-        root_window.update() 
-        x = root_window.winfo_rootx(); y = root_window.winfo_rooty()
-        w = root_window.winfo_width(); h = root_window.winfo_height()
-        if w <= 1 or h <= 1: return None
-        img = ImageGrab.grab(bbox=(x, y, x+w, y+h))
-        white_layer = Image.new("RGB", img.size, (255, 255, 255))
-        blended = Image.blend(img, white_layer, 0.85)
-        # Apply Gaussian Blur for that "frosted glass" effect
-        #blended = blended.filter(ImageFilter.GaussianBlur(radius=5)) 
-        return ImageTk.PhotoImage(blended)
-    except Exception as e:
-        print(f"BG Blur Error: {e}"); return None
 
 # --- BASE MODAL ---
 class ModalOverlay(tk.Toplevel):
@@ -282,6 +274,30 @@ class ModalOverlay(tk.Toplevel):
         if self.bg_img: self.cv.create_image(0, 0, image=self.bg_img, anchor="nw")
         else: self.cv.configure(bg="#FAFAFA")
         self.bind("<Button-1>", lambda e: self.config(cursor="none"))
+
+
+# class LogViewerPopup(ModalOverlay):
+#     def __init__(self, parent):
+#         super().__init__(parent)
+#         self.f = tk.Frame(self.cv, bg="white", width=700, height=400)
+#         self.cv.create_window(parent.winfo_width()/2, parent.winfo_height()/2, window=self.f)
+
+#         tk.Label(self.f, text="SYSTEM LOGS", font=("Arial", 14, "bold"), bg="white").pack(pady=10)
+#         self.text_area = tk.Text(self.f, font=("Courier", 10), height=15, width=80)
+#         self.text_area.pack(pady=10)
+#         RoundedButton(self.f, "CLOSE", self.destroy, width=100, height=40).pack()
+
+#         self.refresh_logs()
+#         self.deiconify()
+
+#     def refresh_logs(self):
+#         try:
+#             with open("/home/lhr/Robot_Client/logs/gui_debug.log", "r") as f:
+#                 logs = f.readlines()[-20:]
+#                 self.text_area.delete(1.0, tk.END)
+#                 self.text_area.insert(tk.END, "".join(logs))
+#         except: pass
+
 
 
 # --- CUSTOM BRIGHTNESS WIDGET ---
@@ -1034,6 +1050,7 @@ class RoundedTile(tk.Canvas):
         if self.icon_widget:
             self.icon_widget.config(bg=self.base_bg)
             if hasattr(self.icon_widget, 'draw'): self.icon_widget.draw()
+
 # --- MODERN BRIGHTNESS SLIDER (No Cursor, Clean Fill) ---
 class ModernBrightness(tk.Canvas):
     def __init__(self, parent, width=140, height=300, initial=50, command=None, bg_color="#F7F9FC"):
@@ -1189,6 +1206,24 @@ class MarqueeLabel(tk.Canvas):
             self.coords(self.text_id, 0, int(self["height"])/2)
             self.after(1000, self.animate)
         except: self.animating = False 
+
+# --- BACKGROUND GENERATOR (FIXED) ---
+def get_blur_bg(root_window):
+    if not HAS_PIL: return None
+    try:
+        root_window.update() 
+        x = root_window.winfo_rootx(); y = root_window.winfo_rooty()
+        w = root_window.winfo_width(); h = root_window.winfo_height()
+        if w <= 1 or h <= 1: return None
+        img = ImageGrab.grab(bbox=(x, y, x+w, y+h))
+        white_layer = Image.new("RGB", img.size, (255, 255, 255))
+        blended = Image.blend(img, white_layer, 0.85)
+        # Apply Gaussian Blur for that "frosted glass" effect
+        #blended = blended.filter(ImageFilter.GaussianBlur(radius=5)) 
+        return ImageTk.PhotoImage(blended)
+    except Exception as e:
+        print(f"BG Blur Error: {e}"); return None
+
 
 class SettingsTray(tk.Frame):
     def __init__(self, parent_root, controller, floating_btn):
@@ -2053,201 +2088,7 @@ class KioskApp(tk.Tk):
             else: 
                 self.backend.state["completed"] = False; self.backend.ui_ack_stop()
                 
-        self.after(200, self.start_ui_updater)
-
-""" 
-class Home(tk.Frame):
-    def __init__(self, parent, controller):
-        super().__init__(parent, bg=CLR_BG)
-        self.c = controller
-        
-        # --- MAIN CARD CONTAINER ---
-        # We use a slightly wider card (750x440) for a "widescreen" look
-        self.card = ShadowCard(self, bg="white")
-        self.card.place(relx=0.5, rely=0.5, anchor="center", width=750, height=440)
-        
-        # Grid: Left (Menu) 35% | Right (Status) 65%
-        self.card.inner.columnconfigure(0, weight=35) 
-        self.card.inner.columnconfigure(1, weight=65)
-        self.card.inner.rowconfigure(0, weight=1)
-
-        # ==========================
-        # LEFT PANEL: CONTROLS (Soft Gray)
-        # ==========================
-        # We use a distinct background color to separate controls from data
-        left_bg = "#F8F9FA" 
-        left_panel = tk.Frame(self.card.inner, bg=left_bg)
-        left_panel.grid(row=0, column=0, sticky="nsew")
-        
-        # 1. Branding (Top Left)
-        brand_frame = tk.Frame(left_panel, bg=left_bg)
-        brand_frame.pack(anchor="w", padx=25, pady=(25, 10))
-        
-        tk.Label(brand_frame, text="LIQUID", font=("Segoe UI", 18, "bold"), fg=CLR_PRIMARY, bg=left_bg).pack(anchor="w")
-        tk.Label(brand_frame, text="HANDLER", font=("Segoe UI", 18, "bold"), fg="#455A64", bg=left_bg).pack(anchor="w")
-        tk.Label(brand_frame, text="v1.5", font=("Segoe UI", 10, "bold"), fg="#B0BEC5", bg=left_bg).pack(anchor="w", pady=(2,0))
-
-        # 2. Buttons (Vertically Centered)
-        btn_container = tk.Frame(left_panel, bg=left_bg)
-        btn_container.pack(expand=True, fill="both", padx=20)
-        
-        # Use a grid inside the container to center buttons perfectly
-        btn_container.grid_columnconfigure(0, weight=1)
-        btn_container.grid_rowconfigure(0, weight=1) # Spacer
-        btn_container.grid_rowconfigure(3, weight=1) # Spacer
-
-        RoundedButton(btn_container, text="CALIBRATION", width=200, height=55, 
-                      bg_color="#FF9800", hover_color="#F57C00", font=("Segoe UI", 11, "bold"),
-                      command=self.on_calibrate_click).grid(row=1, column=0, pady=8)
-                      
-        RoundedButton(btn_container, text="PROTOCOLS", width=200, height=55, 
-                      bg_color=CLR_PRIMARY, hover_color=CLR_PRIMARY_HOVER, font=("Segoe UI", 11, "bold"),
-                      command=lambda: controller.show_frame("ProtocolList")).grid(row=2, column=0, pady=8)
-
-        # 3. Remote Status (Bottom Left)
-        self.lbl_status = tk.Label(left_panel, text="● Remote Offline", font=("Segoe UI", 10, "bold"), fg=CLR_DANGER, bg=left_bg)
-        self.lbl_status.pack(side="bottom", anchor="w", padx=25, pady=25)
-
-        # ==========================
-        # RIGHT PANEL: MODULES (White)
-        # ==========================
-        right_panel = tk.Frame(self.card.inner, bg="white", padx=30, pady=30)
-        right_panel.grid(row=0, column=1, sticky="nsew")
-
-        # Header
-        header_row = tk.Frame(right_panel, bg="white")
-        header_row.pack(fill="x", pady=(0, 20))
-        tk.Label(header_row, text="MODULE CONFIGURATION", font=("Segoe UI", 11, "bold"), fg="#546E7A", bg="white").pack(side="left")
-        
-        # Divider
-        tk.Frame(right_panel, bg="#ECEFF1", height=2).pack(fill="x", pady=(0, 20))
-
-        # -- SLOT 1 --
-        self.slot1 = self.create_pipette_row(right_panel, "L", "MOUNT 1 (LEFT)")
-        self.slot1.pack(fill="x", pady=8)
-
-        # -- SLOT 2 --
-        self.slot2 = self.create_pipette_row(right_panel, "R", "MOUNT 2 (RIGHT)")
-        self.slot2.pack(fill="x", pady=8)
-
-    def create_pipette_row(self, parent, icon_char, label_text):
-        
-        # Outer container for the border/background
-        container = tk.Frame(parent, bg="#FAFAFA", highlightbackground="#ECEFF1", highlightthickness=1, padx=1, pady=1)
-        
-        # Inner content frame
-        inner = tk.Frame(container, bg="#FAFAFA", padx=10, pady=10)
-        inner.pack(fill="both", expand=True)
-        
-        # 1. Big Icon (Left)
-        icon_cv = tk.Canvas(inner, width=45, height=45, bg="#FAFAFA", highlightthickness=0)
-        icon_cv.pack(side="left", padx=(0, 15))
-        icon_cv.create_oval(2, 2, 43, 43, fill="#ECEFF1", outline="")
-        icon_cv.create_text(23, 23, text=icon_char, font=("Segoe UI", 18, "bold"), fill="#B0BEC5")
-        
-        # 2. Info Stack (Right)
-        info = tk.Frame(inner, bg="#FAFAFA")
-        info.pack(side="left", fill="both", expand=True)
-        
-        # Label
-        tk.Label(info, text=label_text, font=("Segoe UI", 8, "bold"), fg="#90A4AE", bg="#FAFAFA").pack(anchor="w")
-        
-        # Marquee
-        mq = MarqueeLabel(info, text="Empty", width=280, height=26, font=("Segoe UI", 14, "bold"), fg="#CFD8DC", bg="#FAFAFA")
-        mq.pack(anchor="w", pady=(1,0))
-        
-        # Serial
-        sn = tk.Label(info, text="--", font=("Consolas", 9), fg="#CFD8DC", bg="#FAFAFA")
-        sn.pack(anchor="w")
-
-        # Save refs
-        container.marquee = mq
-        container.lbl_sn = sn
-        container.canvas = icon_cv
-        container.inner = inner
-        container.info = info
-        container.default_char = icon_char
-        
-        return container
-
-    def update_view(self, state):
-        pips = state.get("pipettes", {})
-        
-        self.update_slot(self.slot1, pips.get("left", {}))
-        self.update_slot(self.slot2, pips.get("right", {}))
-        
-        # Connection Status
-        if self.c.backend.server_connected:
-            self.lbl_status.config(text="● Remote Connected", fg=CLR_SUCCESS)
-        else:
-            self.lbl_status.config(text="● Remote Disconnected", fg=CLR_DANGER)
-
-    def update_slot(self, widget, data):
-        found = data.get("found", False)
-        
-        if found:
-            # STYLE: ACTIVE (Clean White with Green Accent)
-            bg_col = "white"
-            border_col = CLR_SUCCESS # Green Border
-            
-            icon_bg = "#E8F5E9"      # Light Green Circle
-            icon_fg = CLR_SUCCESS    # Green Check
-            icon_char = "✔"
-            
-            text_model_col = CLR_PRIMARY
-            text_sn_col = "#546E7A"
-        else:
-            # STYLE: EMPTY (Grayed Out)
-            bg_col = "#FAFAFA"
-            border_col = "#ECEFF1"
-            
-            icon_bg = "#ECEFF1"
-            icon_fg = "#B0BEC5"
-            icon_char = widget.default_char
-            
-            text_model_col = "#CFD8DC"
-            text_sn_col = "#CFD8DC"
-
-        # Apply Colors (Only if changed to reduce flicker)
-        if widget.cget("bg") != bg_col or widget.cget("highlightbackground") != border_col:
-            widget.config(bg=bg_col, highlightbackground=border_col)
-            widget.inner.config(bg=bg_col)
-            widget.info.config(bg=bg_col)
-            
-            # Update labels inside info frame
-            for child in widget.info.winfo_children():
-                if isinstance(child, tk.Label): child.config(bg=bg_col)
-            
-            # --- FIX: MARQUEE UPDATE ---
-            # MarqueeLabel IS the canvas, so configure it directly
-            widget.marquee.config(bg=bg_col)
-            widget.marquee.itemconfig(widget.marquee.text_id, fill=text_model_col)
-
-            # Update Icon BG
-            widget.canvas.config(bg=bg_col)
-
-        # Update Content
-        model_name = data.get("model", "Empty Slot") if found else "Empty Slot"
-        widget.marquee.set_text(model_name)
-        
-        sn_text = f"ID: {data.get('id', '--')}" if found else "--"
-        widget.lbl_sn.config(text=sn_text, fg=text_sn_col)
-        
-        # Update Icon
-        widget.canvas.itemconfig(1, fill=icon_bg)
-        widget.canvas.itemconfig(2, text=icon_char, fill=icon_fg)
-
-    def on_calibrate_click(self):
-        pips = self.c.backend.state.get("pipettes", {})
-        p1 = pips.get("left", {}).get("found", False)
-        p2 = pips.get("right", {}).get("found", False)
-
-        if not p1 and not p2:
-            CustomMessagePopup(self.c, "⚠️", "NO HARDWARE", "No pipettes detected.\nPlease attach a pipette.")
-        else:
-            self.c.show_frame("Calibrate")
-   """          
-
+        self.after(200, self.start_ui_updater)          
 
 class Home(tk.Frame):
     def __init__(self, parent, controller):
@@ -2434,8 +2275,8 @@ class Home(tk.Frame):
         else:
             self.c.show_frame("Calibrate")      
    # Inside your Home class or SettingsTray:
-    def view_logs(self):
-        LogViewerPopup(self.c)
+    # def view_logs(self):
+    #     LogViewerPopup(self.c)
             
 class Calibrate(tk.Frame):
     def __init__(self, parent, controller):
@@ -3158,8 +2999,7 @@ class Running(tk.Frame):
         else:
             self.fan_slider.set_read_only(False)
             self.lbl_fan_hint.pack(before=self.fan_slider, pady=(0, 2)) # SHOW Hint in Manual     
-            
-                        
+                                 
 if __name__ == "__main__":
     app = KioskApp()
     app.mainloop()
