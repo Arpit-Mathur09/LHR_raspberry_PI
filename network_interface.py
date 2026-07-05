@@ -10,6 +10,11 @@ try:
 except ImportError:  # pragma: no cover - runtime dependency check
     socketio = None
 
+try:
+    import websocket  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency check
+    websocket = None
+
 SERVER_URL = os.getenv("SERVER_URL", "https://remotemachinehandling.onrender.com")
 MACHINE_ID = os.getenv("MACHINE_ID", "M1")
 SOCKET_NAMESPACE = "/hardware"
@@ -28,9 +33,12 @@ class HttpNetworkInterface:
         self._last_emit_time = 0.0
         self._log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "WSap.log")
         os.makedirs(os.path.dirname(self._log_path), exist_ok=True)
+        self._socket_transports = ["websocket", "polling"] if websocket is not None else ["polling"]
 
         if socketio is None:
             self._log("❌ python-socketio is not installed. Install it and restart the client.")
+        elif websocket is None:
+            self._log("⚠️ websocket-client is not installed; using polling transport only.")
 
     def _log(self, message):
         try:
@@ -99,7 +107,7 @@ class HttpNetworkInterface:
             self.sio.connect(
                 socket_url,
                 namespaces=[SOCKET_NAMESPACE],
-                transports=["websocket", "polling"],
+                transports=self._socket_transports,
             )
             if self.sio.connected:
                 self._log("✅ Connected to Server")
