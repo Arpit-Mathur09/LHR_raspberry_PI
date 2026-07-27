@@ -75,7 +75,7 @@ class RobotClient:
         
         self.start_time = None; self.smoothed_seconds = 0
         self.log_accumulator = []; self.current_session_log_path = None
-        self.expect_reset = False
+        self.expect_reset = False  # for reset detection after E-STOP or error
         self.connection_time = time.time(); self.grace_period = 3.0 
 
         self.cleanup_old_logs()
@@ -135,8 +135,8 @@ class RobotClient:
     def ui_pause_resume(self): self.command_queue.put(("TOGGLE_PAUSE", None))
     def ui_stop(self): self.command_queue.put(("STOP", None))
     def ui_ack_start(self): self.state["just_started"] = False
-    def ui_ack_stop(self): self.reset_all_state()
-    def ui_ack_error(self): self.reset_all_state()
+    def ui_ack_stop(self): self.reset_all_state(reset_calibration=False)
+    def ui_ack_error(self): self.reset_all_state(reset_calibration=True)
 
     def start(self):
         threading.Thread(target=self._run_loop, daemon=True).start()
@@ -239,6 +239,10 @@ class RobotClient:
                 if self.pipettes.scan_pipettes():
                     self.state["pipettes"].clear()
                     self.state["pipettes"].update(self.pipettes.get_state())
+                    # CONDITION 4: Pipette detached or swapped
+                    if self.state["is_calibrated"]:
+                        self.log("⚠️ Pipette hardware changed. Calibration reset.")
+                        self.state["is_calibrated"] = False
                 last_pipette_check = time.time()
 
             self.calculate_estimate()
@@ -276,7 +280,8 @@ class RobotClient:
                         self.is_running = False
                         self.log(f"🛑 STOPPED ({source})")
                         last_file = self.state["filename"]
-                        self.reset_all_state()
+                        # CONDITION 3: User manually stopped the protocol
+                        self.reset_all_state(reset_calibration=True)
                         self.state["filename"] = last_file
                         self.state["status"] = f"Stopped ({source})"
                         self.state["stop_reason"] = source
@@ -339,7 +344,8 @@ class RobotClient:
                         if self.expect_reset:
                             self.log("✅ Reset Confirmed")
                             self.expect_reset = False
-                        else:
+                        elif self.is_running:
+                            # ONLY trigger E-STOP popup if a protocol was actually running!
                             self.log("🚨 EMERGENCY STOP (Physical)")
                             self.is_running = False
                             self.state["status"] = "Error"
@@ -347,6 +353,10 @@ class RobotClient:
                             self.state["current_line"] = "E-STOP"
                             self.state["est"] = "HALTED"
                             waiting_for_response = False
+                        else:
+                            # MCU booted or reset while idle: quietly update connection state
+                            self.log("🔌 MCU Online / Rebooted (System Idle)")
+                            self.state["connection"] = "Connected"
 
                     if "ERR" in resp:
                         if time.time() - self.connection_time < self.grace_period:
@@ -356,6 +366,9 @@ class RobotClient:
                             clean_err = parts[1].strip() if len(parts) > 1 else "Unknown Hardware Error"
                             self.log(f"❌ SYSTEM ERROR: {clean_err}")
                             self.is_running = False
+                            
+                            # CONDITION 2: Error in protocol execution
+                            self.reset_all_state(reset_calibration=True)
                             self.state["status"] = "Error"
                             self.state["error_msg"] = clean_err
                             self.state["current_line"] = "Error"
@@ -363,7 +376,7 @@ class RobotClient:
                             self.state["est"] = "ERROR"
                             waiting_for_response = False
                             self.expect_reset = True
-                            self.hard_reset_pico()
+                            self.hard_reset_pico() 
 
                     if self.is_running:
                         if "PAUSE" in resp:
@@ -451,12 +464,14 @@ class RobotClient:
         except Exception:
             pass
             
-    def reset_all_state(self):
+    def reset_all_state(self,reset_calibration=False):
         self.state["stop_reason"] = None; self.state["completed"] = False; self.state["error_msg"] = None
         self.state["filename"] = "None"; self.state["started_by"] = "Unknown"
         self.state["status"] = "Idle"; self.state["current_line"] = "Ready"; self.state["current_desc"] = ""
         self.state["progress"] = 0; self.state["est"] = "--:--:--:--"
-        self.state["is_calibrated"] = False
+        # Condition Check: Only wipe calibration if explicitly triggered
+        if reset_calibration:
+            self.state["is_calibrated"] = False
         self.state["calibration_active"] = False
         self.state["calib_status"] = "Idle"
         self.state["calibration_source"] = None
@@ -466,10 +481,14 @@ class RobotClient:
             pass
 
     def hard_reset_pico(self):
-        print("⚡ Hard Resetting Pico...", flush=True)
-        GPIO.output(self.PIN_RESET, 0); time.sleep(0.2)
-        GPIO.output(self.PIN_RESET, 1); time.sleep(1.5)
+        print("⚡ Hard Resetting MCU...", flush=True)
+        self.expect_reset = True  # <--- CRITICAL FIX: Flag that WE triggered this reset!
+        GPIO.output(self.PIN_RESET, 0)
+        time.sleep(0.2)
+        GPIO.output(self.PIN_RESET, 1)
+        time.sleep(1.5)
         self.connection_time = time.time()
+        self.state["is_calibrated"] = False
 
     def calculate_estimate(self):
         if not self.is_running or self.is_paused or not self.start_time: return
