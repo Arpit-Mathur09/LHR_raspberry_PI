@@ -1,5 +1,11 @@
-#v1.5 Addded power button functionality with confirm popup
-# FORCE UI TO USE DISPLAY :0
+"""
+-> Changes in the calibration screen
+    1. removed the T00 direclty sending (M110 -> if ACK-> TOO else -> Show error (pipette or timeout))
+    2. and added specific response timeout error on the save offset button press fro 5 sec it waits for the final OK <seq> (ack) if not then shows repsonse time out error
+    3. Pipette detection: code changed
+    
+    <TO Do > remove the specific response time out error to the same Code -> queue backend logic for the response time hardware error 
+"""
 import sys
 import os
 import tkinter as tk
@@ -11,7 +17,7 @@ import subprocess
 import time
 import functools
 import threading # Required for async scanning
-
+import re
 
 # # Redirect all print() statements to a log file
 # log_file = open("/home/lhr/Robot_Client/logs/gui_debug.log", "a")
@@ -2210,56 +2216,76 @@ class Home(tk.Frame):
         else:
             self.lbl_status.config(text="● Remote Disconnected", fg=CLR_DANGER)
 
+    def format_pipette_display_name(self, raw_model: str) -> str:
+            if not raw_model or raw_model == "none":
+                return "Empty Slot"
+
+            raw_lower = raw_model.lower()
+
+            # 1. Peristaltic Pump Handling
+            if "peristaltic" in raw_lower or "pump" in raw_lower:
+                return "Peristaltic Dispenser"
+
+            # 2. OT-2 Pipette Regex (Captures e.g., P300 Single v2.1 or v1.5)
+            match = re.search(r'(p\d+)[_\s]*(single|multi)[_\s]*(v[\d\.]+)', raw_model, re.IGNORECASE)
+            if match:
+                vol = match.group(1).upper()
+                channel = match.group(2).capitalize()
+                version = match.group(3)
+                return f"{vol} {channel} ({version})"
+
+            match_simple = re.search(r'(p\d+)[_\s]*(single|multi)', raw_model, re.IGNORECASE)
+            if match_simple:
+                vol = match_simple.group(1).upper()
+                channel = match_simple.group(2).capitalize()
+                return f"{vol} {channel}"
+
+            return raw_model.replace('_', ' ').strip().title()
     def update_slot(self, widget, data):
         found = data.get("found", False)
-        
-        if found:
-            # ACTIVE STYLE
+        raw_model = data.get("model", "none")
+
+        if found and raw_model != "none":
             bg_col = "white"
             border_col = CLR_SUCCESS
-            
             icon_bg = "#E8F5E9"
             icon_fg = CLR_SUCCESS
             icon_char = "✔"
-            
             text_model_col = CLR_PRIMARY
             text_sn_col = "#546E7A"
+
+            # Parse dynamic name & exact hardware version
+            display_name = self.format_pipette_display_name(raw_model)
         else:
-            # EMPTY STYLE
             bg_col = "#FAFAFA"
             border_col = "#ECEFF1"
-            
             icon_bg = "#ECEFF1"
             icon_fg = "#B0BEC5"
             icon_char = widget.default_char
-            
+            display_name = "Empty Slot"
             text_model_col = "#CFD8DC"
             text_sn_col = "#CFD8DC"
 
-        # Apply Colors
+        # Apply UI color updates
         if widget.cget("bg") != bg_col or widget.cget("highlightbackground") != border_col:
             widget.config(bg=bg_col, highlightbackground=border_col)
             widget.inner.config(bg=bg_col)
             widget.info.config(bg=bg_col)
             widget.top_row.config(bg=bg_col)
             
-            for child in widget.top_row.winfo_children(): child.config(bg=bg_col)
+            for child in widget.top_row.winfo_children():
+                child.config(bg=bg_col)
             
-            # Update Marquee
             widget.marquee.config(bg=bg_col)
             widget.marquee.itemconfig(widget.marquee.text_id, fill=text_model_col)
-
-            # Update Icon
             widget.canvas.config(bg=bg_col)
 
-        # Update Content
-        model_name = data.get("model", "Empty Slot") if found else "Empty Slot"
-        widget.marquee.set_text(model_name)
+        widget.marquee.set_text(display_name)
         
+        # Display serial or '--' (OT-2 I2C label removed)
         sn_text = data.get("id", "--") if found else "--"
         widget.lbl_sn.config(text=sn_text, fg=text_sn_col)
         
-        # Update Icon
         widget.canvas.itemconfig(1, fill=icon_bg)
         widget.canvas.itemconfig(2, text=icon_char, fill=icon_fg)
 
@@ -2344,21 +2370,7 @@ class Calibrate(tk.Frame):
         
         self.c.backend.set_calibration_mode(True, "User")
         self.c.backend.sync_with_server() 
-        
-        # --- DYNAMIC PIPETTE CALIBRATION COMMAND ---
-        pips = self.c.backend.state.get("pipettes", {})
-        left_attached = pips.get("left", {}).get("found", False)
-        right_attached = pips.get("right", {}).get("found", False)
-        
-        # Priority: Left (P1), then Right (P2)
-        if left_attached and right_attached:
-            self.c.backend.ui_send_gcode("T00") # Fallback just in case
-        elif left_attached:
-            self.c.backend.ui_send_gcode("T00 P1")
-        elif right_attached:
-            self.c.backend.ui_send_gcode("T00 P2")
-        else:
-            self.c.backend.ui_send_gcode("T00") # Fallback just in case
+         # (REMOVED redundant ui_send_gcode("T00") here)
         self.c.update() 
         self.lbl_x.config(text="X : 0.0"); self.lbl_y.config(text="Y : 0.0"); self.lbl_z1.config(text="Z1: 0.0"); self.lbl_z2.config(text="Z2: 0.0")
         for k in self.c.offsets: self.c.offsets[k].set(0.0)
@@ -2402,15 +2414,81 @@ class Calibrate(tk.Frame):
             self.c.backend.set_calibration_mode(False, None)
             self.c.show_frame("Home")
 
+    # def confirm_save(self):
+    #     c = CustomConfirmPopup(self.c, "?", "SAVE OFFSETS", "Update calibration settings?")
+    #     if c.result:
+    #         self.update() 
+    #         # 1. Send offset save command to STM32
+    #         self.c.backend.ui_send_gcode("OK_C")
+            
+    #         # 2. Immediately end calibration mode in backend
+    #         self.c.backend.set_calibration_mode(False, None)
+            
+    #         # 3. Switch frame to Home
+    #         self.c.show_frame("Home")
+            
+    #         # 4. Display non-blocking success popup on top of Home screen
+    #         CustomPopup(
+    #             self.c, 
+    #             "Saved", 
+    #             "CALIBRATION COMPLETED", 
+    #             "Offsets saved.\nYou may now run a protocol.", 
+    #             CLR_SUCCESS, 
+    #             "✔", 
+    #             height=300, 
+    #             icon_size=38
+    #         )
+   
+   #---------------------------------------------------------------------------------------#
+   # These Functions send the OK_C command to backend and waits for is_calibrated is true
     def confirm_save(self):
         c = CustomConfirmPopup(self.c, "?", "SAVE OFFSETS", "Update calibration settings?")
         if c.result:
             self.update() 
+            
+            # 1. Reset state before sending
+            self.c.backend.state["is_calibrated"] = False
+            
+            # 2. Send OK_C to STM32
             self.c.backend.ui_send_gcode("OK_C")
-            popup = CustomPopup(self.c, "Saved", "CALIBRATION COMPLETED", "Offsets saved.\nYou may now run a protocol.", CLR_SUCCESS, "✔", height=300, icon_size=38)
-            self.wait_window(popup)
-            self.c.show_frame("Home")
+            
+            # 3. Start bounded polling (5-second timeout)
+            self._wait_for_calibration_ack(start_time=time.time(), timeout_sec=5.0)
 
+    def _wait_for_calibration_ack(self, start_time, timeout_sec=5.0):
+        # Case A: Success (STM32 ACK received)
+        if self.c.backend.state.get("is_calibrated", False):
+            self.c.backend.set_calibration_mode(False, None)
+            self.c.show_frame("Home")
+            CustomPopup(
+                self.c, 
+                "Saved", 
+                "CALIBRATION COMPLETED", 
+                "Offsets saved.\nYou may now run a protocol.", 
+                CLR_SUCCESS, 
+                "✔", 
+                height=300, 
+                icon_size=38
+            )
+            return
+
+        # Case B: Timeout (STM32 failed to ACK within 5 seconds)
+        if time.time() - start_time > timeout_sec:
+            CustomPopup(
+                self.c, 
+                "Save Failed", 
+                "RESPONSE TIMED OUT", 
+                "No ACK received for save offsets.\nPlease check connection and try again.", 
+                CLR_DANGER, 
+                "✖", 
+                height=300, 
+                icon_size=38
+            )
+            return
+
+        # Case C: Keep checking every 100ms until success or timeout
+        self.after(100, lambda: self._wait_for_calibration_ack(start_time, timeout_sec))    
+    #-----------------------------------------------------------------------------------------------#
 # --- UPDATE: FOR Fan Mode SEGMENTED TOGGLE SWITCH (Auto | Manual) ---
 class ToggleSwitch(tk.Canvas):
     def __init__(self, parent, options=["Auto", "Manual"], command=None, width=160, height=40):

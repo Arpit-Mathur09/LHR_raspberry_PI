@@ -1,4 +1,7 @@
 # network_interface.py
+""" Removed redundant code for the calibration initialization  
+<TO DO> Ws connection drops during motion mostly .
+"""
 import os
 import time
 import requests
@@ -218,7 +221,6 @@ class HttpNetworkInterface:
             self.engine.command_queue.put(("MANUAL", data))
         elif ev == "CALIB_START":
             self.engine.set_calibration_mode(True, "Remote")
-            self.engine.send_initial_calibration_gcode()
         elif ev == "CALIB_END":
             self.engine.set_calibration_mode(False, None)
 

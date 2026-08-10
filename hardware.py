@@ -1,4 +1,13 @@
 # hardware.py
+""" 
+Pipette manager changed , Now Stm32/Controller will send the pipette model string directly to the Pi, and the Pi will parse it to determine the pipette type and volume. This allows for more flexibility in supporting different pipette models without hardcoding them in the Pi software.
+->Stm32 will send "T11 P1=<data> P2=<data>" 
+->PI sends T11 on startup to request pipette info from the controller, and the controller responds with the pipette model strings for P1 and P2. The Pi then parses these strings to determine the pipette type and volume.
+ 
+ <Edge Case>
+<TO Do> Currently on change of Pipette mounting Stm32 automatically send the command to the pipette info to the pi ,but if stm32 is disconnected or not responding PI will keep on showing the last pipette info, so we need to implement a timeout mechanism to reset the pipette info if no update is received from the controller within a certain time frame. This will ensure that the Pi always has accurate information about the pipettes attached to the system.
+
+"""
 import os
 import glob
 import time
@@ -266,49 +275,45 @@ class LightController:
 
 
 class PipetteManager:
-    def __init__(self, bus_id=1):
-        self.bus_id = bus_id
+    def __init__(self):
         self.slots = {
-            "left": {"addr": 0x50, "name": "Slot 1", "model": None, "id": None, "found": False},
-            "right": {"addr": 0x51, "name": "Slot 2", "model": None, "id": None, "found": False}
+            "left": {"name": "Slot 1 (P1)", "model": "none", "id": "--", "found": False, "volume_ul": 0.0},
+            "right": {"name": "Slot 2 (P2)", "model": "none", "id": "--", "found": False, "volume_ul": 0.0}
         }
-        self.scan_pipettes()
 
-    def read_string(self, bus, addr, start_mem, length):
-        try:
-            bus.write_byte(addr, start_mem)
-            chars = []
-            for _ in range(length):
-                byte = bus.read_byte(addr)
-                if byte != 0xFF and 32 <= byte <= 126: chars.append(chr(byte))
-            return "".join(chars).strip()
-        except: return None
-
-    def scan_pipettes(self):
+    def update_from_t11(self, p1_model: str, p2_model: str) -> bool:
         changed = False
-        if not HARDWARE_AVAILABLE: return False
-        try: bus = smbus2.SMBus(self.bus_id)
-        except: return False
 
-        for key, slot in self.slots.items():
-            addr = slot["addr"]; was_found = slot["found"]
-            try:
-                bus.write_quick(addr)
-                mfg = self.read_string(bus, addr, 0x00, 8)
-                if mfg and "opentron" in mfg.lower():
-                    if not was_found:
-                        slot["found"] = True
-                        slot["id"] = self.read_string(bus, addr, 0x30, 20) or "Unknown ID"
-                        slot["model"] = self.read_string(bus, addr, 0x60, 20) or "Unknown Model"
-                        print(f"✅ Pipette Attached {slot['name']}: {slot['model']}")
-                        changed = True
+        def apply_slot(slot_key, raw_model):
+            nonlocal changed
+            slot = self.slots[slot_key]
+            is_attached = (raw_model != "none" and len(raw_model) > 0)
+            
+            if slot["found"] != is_attached or slot["model"] != raw_model:
+                slot["found"] = is_attached
+                slot["model"] = raw_model if is_attached else "none"
+                
+                # --- Dynamic Category Label ---
+                raw_lower = raw_model.lower()
+                if not is_attached:
+                    slot["id"] = "--"
+                elif "peristaltic" in raw_lower or "pump" in raw_lower:
+                    slot["id"] = "Peristaltic Pump"
+                elif any(p in raw_lower for p in ["p20", "p300", "p1000", "opentron"]):
+                    slot["id"] = "OT-2 Pipette"
                 else:
-                    if was_found:
-                        slot["found"] = False; slot["id"] = slot["model"] = None; changed = True
-            except OSError:
-                if was_found:
-                    slot["found"] = False; slot["id"] = slot["model"] = None; changed = True
-        bus.close()
+                    slot["id"] = "Custom Module"
+                
+                # Volume extraction
+                if "p20" in raw_lower: slot["volume_ul"] = 20.0
+                elif "p300" in raw_lower: slot["volume_ul"] = 300.0
+                elif "p1000" in raw_lower: slot["volume_ul"] = 1000.0
+                else: slot["volume_ul"] = 0.0
+                
+                changed = True
+
+        apply_slot("left", p1_model)
+        apply_slot("right", p2_model)
         return changed
 
     def get_state(self):
