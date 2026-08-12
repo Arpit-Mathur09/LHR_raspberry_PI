@@ -142,12 +142,17 @@ class RobotClient:
         self._clear_command_queue()
         self.log("⏱️ No response from controller for 5s — raising hardware error")
         self.is_running = False
+        # Save error message before reset_all_state clears it
+        error_msg = "No response from controller"
         self.state["status"] = "Error"
-        self.state["error_msg"] = "No response from controller"
+        self.state["error_msg"] = error_msg
         self.state["current_line"] = "Error"
         self.state["stop_reason"] = "Controller Timeout"
         self.expect_reset = True
         self.reset_all_state(reset_calibration=True)
+        # Restore error message after reset so UI can display it
+        self.state["error_msg"] = error_msg
+        self.state["status"] = "Error"
         self.hard_reset_pico()
 
     def _clear_command_queue(self):
