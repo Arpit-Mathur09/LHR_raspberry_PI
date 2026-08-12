@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=Custom Splash
+Description=Professional Boot Logo
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/custom-splash
+ScriptFile=/usr/share/plymouth/themes/custom-splash/custom-splash.script
